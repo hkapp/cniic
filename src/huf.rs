@@ -86,12 +86,14 @@ fn build<I, T, N>(freq_items: I) -> (Enc<T>, Dec<T>)
     impl<T, N: Eq> Eq for Suffix<T, N> { }
     impl<T, N: PartialOrd> PartialOrd for Suffix<T, N> {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            self.freq.partial_cmp(&other.freq)
+            // Suffix has a reverse ordering to have a min_heap later
+            self.freq.partial_cmp(&other.freq).map(Ordering::reverse)
         }
     }
     impl<T, N: Ord> Ord for Suffix<T, N> {
         fn cmp(&self, other: &Self) -> Ordering {
-            self.freq.cmp(&other.freq)
+            // Suffix has a reverse ordering to have a min_heap later
+            self.freq.cmp(&other.freq).reverse()
         }
     }
 
@@ -222,10 +224,59 @@ impl<'a, T> BinTrieIter<'a, T> {
     }
 
     fn pop_parents(&mut self) {
-        // Pop parents we're to the right of
-        while self.curr_rep.last() == Some(&Bit::One) {
-            let _  = self.stack.pop();
-            let _  = self.curr_rep.pop();
+        // Pop at least one parent
+        let _ = self.stack.pop();
+        let mut prev_dir = self.curr_rep.pop();
+
+        // Pop all the parents we were to the right of
+        while prev_dir == Some(Bit::One) {
+            let _ = self.stack.pop();
+            prev_dir = self.curr_rep.pop();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Bit;
+
+    fn huf_abc() -> (super::Enc<char>, super::Dec<char>) {
+        super::build([('a', 2), ('b', 1), ('c', 1)].into_iter())
+    }
+
+    #[test]
+    fn builder_is_sane() {
+        let (enc, dec) = huf_abc();
+        assert_eq!(enc.codes.len(), 3);
+        assert_eq!(enc.codes.len(), 3);
+    }
+
+    #[test]
+    fn bintrie_iter1() {
+        let trie = super::BinTrie::leaf(1);
+        let mut bti = trie.iter();
+        assert!(bti.next().is_some());
+        assert!(bti.next().is_none());
+    }
+
+    #[test]
+    fn bintrie_iter2() {
+        let trie =
+            super::BinTrie::compose(
+                Box::new(super::BinTrie::leaf(0)),
+                Box::new(super::BinTrie::leaf(1)));
+        let mut bti = trie.iter();
+
+        assert_eq!(bti.next(), Some((vec![Bit::Zero], &0)));
+        assert_eq!(bti.next(), Some((vec![Bit::One], &1)));
+        assert!(bti.next().is_none());
+    }
+
+    #[test]
+    fn code_lens1() {
+        let (enc, dec) = huf_abc();
+        assert_eq!(enc.codes.get(&'a').map(|c| c.bit_count), Some(1));
+        assert_eq!(enc.codes.get(&'b').map(|c| c.bit_count), Some(2));
+        assert_eq!(enc.codes.get(&'c').map(|c| c.bit_count), Some(2));
     }
 }
