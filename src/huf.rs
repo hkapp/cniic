@@ -60,6 +60,30 @@ impl<T: Hash + Eq + Clone> From<&Dec<T>> for Enc<T> {
     }
 }
 
+impl<T: Hash + Eq> Enc<T> {
+    fn encode<W: bit::WriteBit>(&self, symbol: &T, writer: &mut W) -> Option<()> {
+        let code = self.codes.get(symbol);
+        if code.is_none() {
+            return None;
+        }
+        let code = code.unwrap();
+        if code.packed_bits.len() == 0 {
+            return Some(());
+        }
+
+        for i in 0..(code.packed_bits.len() - 1) {
+            writer.write_byte(*code.packed_bits.get(i).unwrap());
+        }
+
+        let incomplete_byte = *code.packed_bits.last().unwrap();
+        for j in (0..(code.bit_count % 8)).rev() {
+            writer.write(bit::nth(incomplete_byte, j as u8));
+        }
+
+        return Some(());
+    }
+}
+
 /* Dec */
 
 struct Dec<T> {

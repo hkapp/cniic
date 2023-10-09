@@ -32,3 +32,37 @@ pub fn byte_from_slice(bits: &[Bit]) -> Option<u8> {
 
     return Some(n);
 }
+
+pub fn nth(byte: u8, idx: u8) -> Bit {
+    let masked = byte & (1u8 << idx);
+    if masked == 0 {
+        Bit::Zero
+    }
+    else {
+        Bit::One
+    }
+}
+
+pub fn bit_array(byte: u8) -> [Bit; 8] {
+    [
+        nth(byte, 0),
+        nth(byte, 1),
+        nth(byte, 2),
+        nth(byte, 3),
+
+        nth(byte, 4),
+        nth(byte, 5),
+        nth(byte, 6),
+        nth(byte, 7),
+    ]
+}
+
+pub trait WriteBit {
+    fn write(&mut self, b: Bit);
+
+    fn write_byte(&mut self, n: u8) {
+        for b in bit_array(n).iter() {
+            self.write(*b);
+        }
+    }
+}
