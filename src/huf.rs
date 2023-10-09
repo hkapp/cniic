@@ -3,25 +3,74 @@ use std::collections::{HashMap, BinaryHeap};
 use std::hash::Hash;
 use std::ops::Add;
 
-type Code = u8;
+use crate::bit::Bit;
+use crate::bit;
+
+/* Enc */
+
+struct Code {
+    bit_count:   u16,
+    packed_bits: Vec<u8>,
+}
+
+impl From<&[Bit]> for Code {
+    fn from(bits: &[Bit]) -> Self {
+        let mut packed_bits = Vec::new();
+        let mut rem_bits = bits.len();
+        let mut pos = 0;
+
+        // Pack the bits 8-by-8 as long as possible
+        while rem_bits >= 8 {
+            let full_byte = bit::byte_from_slice(&bits[pos..(pos+8)]).unwrap();
+            packed_bits.push(full_byte);
+            pos += 8;
+            rem_bits -= 8;
+        }
+
+        // Pack the remaining bits
+        if rem_bits > 0 {
+            let mut incomplete_byte = 0u8;
+            while pos < bits.len() {
+                incomplete_byte <<= 1;
+                incomplete_byte &= bits[pos].byte();
+                pos += 1;
+            }
+        }
+
+        Code {
+            bit_count: bits.len().try_into().unwrap(),
+            packed_bits
+        }
+    }
+}
 
 struct Enc<T> {
     codes: HashMap<T, Code>
 }
 
-impl<T> From<&Dec<T>> for Enc<T> {
+impl<T: Hash + Eq + Clone> From<&Dec<T>> for Enc<T> {
     fn from(enc: &Dec<T>) -> Self {
-
+        let mut codes = HashMap::new();
+        for (bits, symbol) in enc.trie.iter() {
+            codes.insert(symbol.clone(), Code::from(bits));
+        }
+        Enc {
+            codes
+        }
     }
 }
+
+/* Dec */
 
 struct Dec<T> {
     trie: BinTrie<T>
 }
 
+/* build */
+
 fn build<I, T, N>(freq_items: I) -> (Enc<T>, Dec<T>)
     where I: Iterator<Item = (T, N)>,
-        T: Eq + Hash,
+        T: Eq + Hash + Clone,
         N: Add<Output = N> + Ord
 {
     struct Suffix<T, N> {
@@ -78,6 +127,8 @@ fn build<I, T, N>(freq_items: I) -> (Enc<T>, Dec<T>)
     (enc, dec)
 }
 
+/* BinTrie */
+
 enum BinTrie<T> {
     Leaf(T),
     Branch(Box<BinTrie<T>>, Box<BinTrie<T>>)
@@ -90,5 +141,23 @@ impl<T> BinTrie<T> {
 
     fn compose(left: Box<Self>, right: Box<Self>) -> Self {
         BinTrie::Branch(left, right)
+    }
+
+    // Iterate over all the elements and representations of this trie
+    fn iter(&self) -> BinTrieIter<T> {
+
+    }
+}
+
+struct BinTrieIter<'a, T> {
+    stack:    Vec<&'a BinTrie<T>>,
+    curr_rep: Vec<Bit>
+}
+
+impl<'a, T> Iterator for BinTrieIter<'a, T> {
+    type Item = (&'a [Bit], &'a T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+
     }
 }
