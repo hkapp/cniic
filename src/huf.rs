@@ -52,7 +52,7 @@ impl<T: Hash + Eq + Clone> From<&Dec<T>> for Enc<T> {
     fn from(enc: &Dec<T>) -> Self {
         let mut codes = HashMap::new();
         for (bits, symbol) in enc.trie.iter() {
-            codes.insert(symbol.clone(), Code::from(bits));
+            codes.insert(symbol.clone(), Code::from(&bits as &[Bit]));
         }
         Enc {
             codes
@@ -145,7 +145,7 @@ impl<T> BinTrie<T> {
 
     // Iterate over all the elements and representations of this trie
     fn iter(&self) -> BinTrieIter<T> {
-
+        BinTrieIter::new(self)
     }
 }
 
@@ -155,9 +155,77 @@ struct BinTrieIter<'a, T> {
 }
 
 impl<'a, T> Iterator for BinTrieIter<'a, T> {
-    type Item = (&'a [Bit], &'a T);
+    type Item = (Vec<Bit>, &'a T);
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.is_over() {
+            return None;
+        }
 
+        // 1. Save the next iterator value
+        let rep = self.curr_rep.clone();
+        let sym =
+            match self.stack.last() {
+                Some(BinTrie::Leaf(t)) => t,
+                _                      => panic!("Logic error: no value in iterator"),
+            };
+
+        // 2. Move to the next leaf:
+        //    Pop parents we're to the right of
+        //    Move right once
+        //    Move to the leaf left-most in this new sub-tree
+        self.pop_parents();
+        if !self.is_over() {
+            self.right_once();
+            self.all_the_way_left();
+        }
+
+        return Some((rep, sym));
+    }
+}
+
+impl<'a, T> BinTrieIter<'a, T> {
+    fn new(trie: &'a BinTrie<T>) -> Self {
+        let mut bti =
+            BinTrieIter {
+                stack:    vec![trie],
+                curr_rep: Vec::new()
+            };
+        bti.all_the_way_left();
+        return bti;
+    }
+
+    fn is_over(&self) -> bool {
+        self.stack.len() == 0
+    }
+
+    fn all_the_way_left(&mut self) {
+        let mut curr_node: &'a BinTrie<T> = self.stack.last().unwrap();
+        while let BinTrie::Branch(left, _) = curr_node {
+            self.stack.push(left);
+            self.curr_rep.push(Bit::Zero);
+            curr_node = left;
+        }
+    }
+
+    fn right_once(&mut self) {
+        match self.stack.last().unwrap() {
+            BinTrie::Branch(_, right) => {
+                self.stack.push(right);
+                self.curr_rep.push(Bit::One);
+            }
+            BinTrie::Leaf(_) => {
+                // This is actually guaranteed by the code logic
+                panic!("We must have a right child")
+            }
+        }
+    }
+
+    fn pop_parents(&mut self) {
+        // Pop parents we're to the right of
+        while self.curr_rep.last() == Some(&Bit::One) {
+            let _  = self.stack.pop();
+            let _  = self.curr_rep.pop();
+        }
     }
 }
