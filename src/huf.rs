@@ -20,6 +20,7 @@ impl From<&[Bit]> for Code {
         let mut pos = 0;
 
         // Pack the bits 8-by-8 as long as possible
+        /* TODO replace with bitwriter */
         while rem_bits >= 8 {
             let full_byte = bit::byte_from_slice(&bits[pos..(pos+8)]).unwrap();
             packed_bits.push(full_byte);
@@ -31,10 +32,10 @@ impl From<&[Bit]> for Code {
         if rem_bits > 0 {
             let mut incomplete_byte = 0u8;
             while pos < bits.len() {
-                incomplete_byte <<= 1;
-                incomplete_byte &= bits[pos].byte();
+                bit::push_bit(&mut incomplete_byte, bits[pos]);
                 pos += 1;
             }
+            packed_bits.push(incomplete_byte);
         }
 
         Code {
@@ -88,6 +89,14 @@ impl<T: Hash + Eq> Enc<T> {
 
 struct Dec<T> {
     trie: BinTrie<T>
+}
+
+impl<T> Dec<T> {
+    fn decode<I>(&self, input: &mut I) -> Option<&T>
+        where I: Iterator<Item = Bit>
+    {
+        self.trie.lookup(input)
+    }
 }
 
 /* build */
@@ -172,6 +181,27 @@ impl<T> BinTrie<T> {
     // Iterate over all the elements and representations of this trie
     fn iter(&self) -> BinTrieIter<T> {
         BinTrieIter::new(self)
+    }
+
+    fn lookup<I>(&self, input: &mut I) -> Option<&T>
+        where I: Iterator<Item = Bit>
+    {
+        let mut curr_node = self;
+        loop {
+            match curr_node {
+                BinTrie::Branch(left, right) => {
+                    curr_node =
+                        match input.next() {
+                            Some(Bit::Zero) => left,
+                            Some(Bit::One)  => right,
+                            None            => return None, /* EOF */
+                        };
+                }
+                BinTrie::Leaf(value) => {
+                    return Some(value);
+                }
+            }
+        }
     }
 }
 
@@ -262,7 +292,8 @@ impl<'a, T> BinTrieIter<'a, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::Bit;
+    use super::bit;
+    use bit::{Bit, WriteBit};
 
     fn huf_abc() -> (super::Enc<char>, super::Dec<char>) {
         super::build([('a', 2), ('b', 1), ('c', 1)].into_iter())
@@ -270,7 +301,7 @@ mod tests {
 
     #[test]
     fn builder_is_sane() {
-        let (enc, dec) = huf_abc();
+        let (enc, _) = huf_abc();
         assert_eq!(enc.codes.len(), 3);
         assert_eq!(enc.codes.len(), 3);
     }
@@ -298,9 +329,50 @@ mod tests {
 
     #[test]
     fn code_lens1() {
-        let (enc, dec) = huf_abc();
+        let (enc, _) = huf_abc();
         assert_eq!(enc.codes.get(&'a').map(|c| c.bit_count), Some(1));
         assert_eq!(enc.codes.get(&'b').map(|c| c.bit_count), Some(2));
         assert_eq!(enc.codes.get(&'c').map(|c| c.bit_count), Some(2));
+    }
+
+    fn enc_str(enc: &super::Enc<char>, s: &str) -> Vec<u8> {
+        let mut bw = bit::IoBitWriter::new(Vec::new());
+        for c in s.chars() {
+            enc.encode(&c, &mut bw);
+        }
+        bw.pad_and_flush();
+        return bw.into_inner();
+    }
+
+    #[test]
+    fn enc_dec1() {
+        let (enc, dec) = huf_abc();
+        let input = "a";
+
+        let message = enc_str(&enc, input);
+        let byte_iter = message.into_iter();
+        let mut bit_iter = byte_iter.flat_map(
+                            |n| bit::bit_array(n).into_iter().rev());
+
+        for c in input.chars() {
+            let decoded = dec.decode(&mut bit_iter);
+            assert_eq!(decoded, Some(&c));
+        }
+    }
+
+    #[test]
+    fn enc_dec2() {
+        let (enc, dec) = huf_abc();
+        let input = "abcabcaabbcc";
+
+        let message = enc_str(&enc, input);
+        let byte_iter = message.into_iter();
+        let mut bit_iter = byte_iter.flat_map(
+                            |n| bit::bit_array(n).into_iter().rev());
+
+        for c in input.chars() {
+            let decoded = dec.decode(&mut bit_iter);
+            assert_eq!(decoded, Some(&c));
+        }
     }
 }
