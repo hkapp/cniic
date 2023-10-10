@@ -1,3 +1,4 @@
+mod bench;
 mod bit;
 mod huf;
 mod utils;
@@ -10,7 +11,7 @@ use bytesize::ByteSize;
 fn main() {
     // Use the open function to load an image from a Path.
     // `open` returns a `DynamicImage` on success.
-    let path = "data/DIV2K_valid_HR/0801.png";
+    let path = "data/DIV2K_valid_HR/0806.png";
     let img = image::open(path).unwrap();
 
     // The dimensions method returns the images width and height.
