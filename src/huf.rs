@@ -45,7 +45,7 @@ impl From<&[Bit]> for Code {
     }
 }
 
-struct Enc<T> {
+pub struct Enc<T> {
     codes: HashMap<T, Code>
 }
 
@@ -62,7 +62,7 @@ impl<T: Hash + Eq + Clone> From<&Dec<T>> for Enc<T> {
 }
 
 impl<T: Hash + Eq> Enc<T> {
-    fn encode<W: bit::WriteBit>(&self, symbol: &T, writer: &mut W) -> Option<()> {
+    pub fn encode<W: bit::WriteBit>(&self, symbol: &T, writer: &mut W) -> Option<()> {
         let code = self.codes.get(symbol);
         if code.is_none() {
             return None;
@@ -87,12 +87,12 @@ impl<T: Hash + Eq> Enc<T> {
 
 /* Dec */
 
-struct Dec<T> {
+pub struct Dec<T> {
     trie: BinTrie<T>
 }
 
 impl<T> Dec<T> {
-    fn decode<I>(&self, input: &mut I) -> Option<&T>
+    pub fn decode<I>(&self, input: &mut I) -> Option<&T>
         where I: Iterator<Item = Bit>
     {
         self.trie.lookup(input)
@@ -101,7 +101,7 @@ impl<T> Dec<T> {
 
 /* build */
 
-fn build<I, T, N>(freq_items: I) -> (Enc<T>, Dec<T>)
+pub fn build<I, T, N>(freq_items: I) -> (Enc<T>, Dec<T>)
     where I: Iterator<Item = (T, N)>,
         T: Eq + Hash + Clone,
         N: Add<Output = N> + Ord
