@@ -81,16 +81,35 @@ impl bench::Bench for () {
         // Write the dimensions of the image
         img.dimensions().serialize(writer);
 
+        // Now write the data
         let mut bw = bit::IoBitWriter::new(writer);
         for px in pixels_iter() {
             enc.encode(&px, &mut bw);
         }
         bw.pad_and_flush();
-        writer.flush();
+        bw.into_inner().flush();
     }
 
-    fn decode<I: Iterator<Item = u8>>(reader: I) -> bench::Img {
+    fn decode<I: Iterator<Item = u8>>(reader: &mut I) -> Option<bench::Img> {
+        use ser::Deserialize;
 
+        // Start by reading the decoder
+        let dec: huf::Dec<image::Rgb<u8>> = Deserialize::deserialize(reader)?;
+
+        // Read the dimensions of the image
+        // TODO make the dims into a type
+        let dims: (u32, u32) = Deserialize::deserialize(reader)?;
+
+        // Read the data and create the image
+        // FIXME introduce MsbFirst / LsbFirst
+        let mut bits = reader.flat_map(
+                            |n| bit::bit_array(n).into_iter().rev());
+        let mut img = image::RgbImage::new(dims.0, dims.1);
+        for px in img.pixels_mut() {
+            *px = *dec.decode(&mut bits)?;
+        }
+
+        Some(img.into())
     }
 
     fn name() -> String {

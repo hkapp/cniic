@@ -407,3 +407,30 @@ impl<T: Serialize> Serialize for BinTrie<T> {
         }
     }
 }
+
+impl<T: Deserialize> Deserialize for Dec<T> {
+    fn deserialize<I: Iterator<Item = u8>>(stream: &mut I) -> Option<Self> {
+        Deserialize::deserialize(stream)
+            .map(|trie| Dec { trie })
+    }
+}
+
+impl<T: Deserialize> Deserialize for BinTrie<T> {
+    fn deserialize<I: Iterator<Item = u8>>(stream: &mut I) -> Option<Self> {
+        let decider: u8 = Deserialize::deserialize(stream)?;
+        match decider {
+            SER_ENUM_LEAF => {
+                let value = Deserialize::deserialize(stream)?;
+                Some(BinTrie::Leaf(value))
+            }
+            SER_ENUM_BRANCH => {
+                let left = Deserialize::deserialize(stream)?;
+                let right = Deserialize::deserialize(stream)?;
+                Some(BinTrie::Branch(Box::new(left), Box::new(right)))
+            }
+            _ => {
+                None // Failed to deserialize
+            }
+        }
+    }
+}

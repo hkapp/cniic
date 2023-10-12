@@ -7,7 +7,7 @@ pub type Img = image::DynamicImage;
 
 pub trait Bench {
     fn encode<W: io::Write>(img: &Img, writer: &mut W);
-    fn decode<I: Iterator<Item = u8>>(reader: I) -> Img;
+    fn decode<I: Iterator<Item = u8>>(reader: &mut I) -> Option<Img>;
     fn name() -> String;
 }
 
@@ -28,9 +28,16 @@ pub fn measure_all<T: Bench>(input_data: &str) -> io::Result<()> {
 
             let compressed_size = data.len();
 
-            let test = T::decode(data.into_iter());
-            if test != img {
-                return Err(String::from("Error"));
+            let decoded = T::decode(&mut data.into_iter());
+            match decoded {
+                Some(test) => {
+                    if test != img {
+                        return Err(String::from("Decoded image doesn't match"))
+                    }
+                }
+                None => {
+                    return Err(String::from("Could not decode the image"))
+                }
             }
 
             if !wrote_header {
