@@ -2,11 +2,14 @@ mod bench;
 mod bit;
 mod huf;
 mod utils;
+mod ser;
 
 use bit::WriteBit;
+use ser::Serialize;
 
 use image::{GenericImageView, Pixel};
 use bytesize::ByteSize;
+use std::io;
 
 fn main() {
     // Use the open function to load an image from a Path.
@@ -64,4 +67,33 @@ fn measure<F: FnOnce() -> T, T>(f: F, description: &str) -> T {
 
     println!("{}: {:?}", description, duration);
     return res;
+}
+
+impl bench::Bench for () {
+    fn encode<W: io::Write>(img: &bench::Img, writer: &mut W) {
+        let pixels_iter = || img.pixels().map(|(_x, _y, px)| px.to_rgb());
+        let freqs = utils::count_freqs(pixels_iter());
+        let (enc, dec) = huf::build(freqs.into_iter());
+
+        // Start by serializing the decoder
+        dec.serialize(writer);
+
+        // Write the dimensions of the image
+        img.dimensions().serialize(writer);
+
+        let mut bw = bit::IoBitWriter::new(writer);
+        for px in pixels_iter() {
+            enc.encode(&px, &mut bw);
+        }
+        bw.pad_and_flush();
+        writer.flush();
+    }
+
+    fn decode<I: Iterator<Item = u8>>(reader: I) -> bench::Img {
+
+    }
+
+    fn name() -> String {
+        String::from("Hufman")
+    }
 }

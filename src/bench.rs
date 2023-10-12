@@ -3,11 +3,10 @@ use std::io;
 use std::fmt::Debug;
 use std::path::PathBuf;
 
-type Img = image::DynamicImage;
-//type Result<T> = io::Result<T>;
+pub type Img = image::DynamicImage;
 
 pub trait Bench {
-    fn encode<W: io::Write>(writer: &mut W);
+    fn encode<W: io::Write>(img: &Img, writer: &mut W);
     fn decode<I: Iterator<Item = u8>>(reader: I) -> Img;
     fn name() -> String;
 }
@@ -25,7 +24,7 @@ pub fn measure_all<T: Bench>(input_data: &str) -> io::Result<()> {
                         .map_err(|e| format!("{:?}", e))?;
 
             let mut data = Vec::new();
-            T::encode(&mut data);
+            T::encode(&img, &mut data);
 
             let compressed_size = data.len();
 

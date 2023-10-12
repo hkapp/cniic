@@ -376,3 +376,34 @@ mod tests {
         }
     }
 }
+
+/* Serialize / Deserialize */
+use std::io;
+use crate::ser::{Serialize, Deserialize};
+
+const SER_ENUM_LEAF:   u8 = 0;
+const SER_ENUM_BRANCH: u8 = 1;
+
+impl<T: Serialize> Serialize for Dec<T> {
+    fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        self.trie.serialize(writer)
+    }
+}
+
+impl<T: Serialize> Serialize for BinTrie<T> {
+    fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        match self {
+            BinTrie::Leaf(v) => {
+                SER_ENUM_LEAF.serialize(writer)?;
+                v.serialize(writer)?;
+                Ok(())
+            }
+            BinTrie::Branch(left, right) => {
+                SER_ENUM_BRANCH.serialize(writer)?;
+                left.serialize(writer)?;
+                right.serialize(writer)?;
+                Ok(())
+            }
+        }
+    }
+}
