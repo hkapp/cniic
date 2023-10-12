@@ -1,7 +1,7 @@
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::fmt::Debug;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub type Img = image::DynamicImage;
 
@@ -11,16 +11,17 @@ pub trait Bench {
     fn name() -> String;
 }
 
-pub fn measure_all<T: Bench>(input_data: &str) -> io::Result<()> {
+pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
+    where I: Iterator<Item = P>,
+        P: AsRef<Path>,
+        T: Bench
+{
     let mut wrote_header = false;
     let mut csv = csv_writer::<T>()?;
 
-    std::fs::read_dir(input_data)?
-        .map(|mbf| {
-            let f = mbf.map_err(|e| format!("{:?}", e))?;
-            let file_name = f.path();
-
-            let img = load_image(&file_name)
+    paths
+        .map(|p| {
+            let img = image::open(p.as_ref())
                         .map_err(|e| format!("{:?}", e))?;
 
             let mut data = Vec::new();
@@ -45,6 +46,8 @@ pub fn measure_all<T: Bench>(input_data: &str) -> io::Result<()> {
                     .map_err(|e| format!("{:?}", e))?;
                 wrote_header = true;
             }
+
+            let file_name = p.as_ref().to_str().unwrap_or("???");
             csv.serialize((file_name, compressed_size))
                 .map_err(|e| format!("{:?}", e))?;
             Ok(())
@@ -61,10 +64,6 @@ fn csv_writer<T: Bench>() -> Result<csv::Writer<fs::File>, csv::Error> {
     csv_filename.push_str(".csv");
 
     csv::Writer::from_path(&csv_filename)
-}
-
-fn load_image(path: &PathBuf) -> Result<Img, image::ImageError> {
-    image::open(path)
 }
 
 fn print_err<T, E: Debug>(r: Result<T, E>) {
