@@ -104,20 +104,25 @@ impl<W: std::io::Write> WriteBit for IoBitWriter<W> {
     }
 
     fn write_byte(&mut self, n: u8) {
+        //println!("curr_bits: 0x{:02x} ~ 0b{:08b}, bit_count: {}, new_byte: 0x{:02x}", self.curr_bits, self.curr_bits, self.bit_count, n);
         if self.bit_count == 0 {
             self.writer.write_all(&[n]);
         }
         else {
             let msb = self.curr_bits << (8 - self.bit_count);
             let lsb = n >> self.bit_count;
-            let completed_byte = msb & lsb;
+            let completed_byte = msb | lsb;
+            //println!("msb: 0x{:02x} ~ 0b{:08b}", msb, msb);
+            //println!("lsb: 0x{:02x} ~ 0b{:08b}", lsb, lsb);
+            //println!("completed_byte: 0x{:02x} ~ 0b{:08b}", completed_byte, completed_byte);
             self.writer.write_all(&[completed_byte]);
 
             let mut mask = 0u8;
             for _ in 0..self.curr_bits {
-                mask = (mask << 1) & 1;
+                mask = (mask << 1) | 1;
             }
             self.curr_bits = n & mask;
+            //println!("curr_bits: 0x{:02x}, bit_count: {}, new_byte: 0x{:02x}", self.curr_bits, self.bit_count, n);
         }
     }
 
@@ -169,5 +174,29 @@ mod tests {
             bw.write(Bit::One);
         }
         assert_eq!(bw.into_inner(), vec![0xffu8]);
+    }
+
+    #[test]
+    fn interleaved_byte() {
+        let mut bw = vec_bw();
+
+        // Write 0b010
+        bw.write(Bit::Zero);
+        bw.write(Bit::One);
+        bw.write(Bit::Zero);
+
+        // Write 0xf0
+        bw.write_byte(0xf0);
+
+        // Write 0b01100
+        bw.write(Bit::Zero);
+        bw.write(Bit::One);
+        bw.write(Bit::One);
+        bw.write(Bit::Zero);
+        bw.write(Bit::Zero);
+
+        // Total sequence is 0101 1110 0000 1100
+        //                 = 0x5e0c
+        assert_eq!(bw.into_inner(), vec![0x5e, 0x0c]);
     }
 }
