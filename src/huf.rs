@@ -8,9 +8,15 @@ use crate::bit;
 
 /* Enc */
 
+// The bits in this data structure are packed into bytes
+// This packing is done MSB first
+// TODO consider moving this to the bit module (e.g. BitArray)
+// Note: then it can be used for the IoBitWriter
+#[derive(PartialEq, Eq, Debug)]
 struct Code {
-    bit_count:   u16,
-    packed_bits: Vec<u8>,
+    full_bytes:      Vec<u8>,
+    partial_count:   u8,
+    partial_byte:    u8,
 }
 
 impl From<&[Bit]> for Code {
@@ -20,7 +26,7 @@ impl From<&[Bit]> for Code {
         let mut pos = 0;
 
         // Pack the bits 8-by-8 as long as possible
-        /* TODO replace with bitwriter */
+        /* TODO make this into a bit module interface */
         while rem_bits >= 8 {
             let full_byte = bit::byte_from_slice(&bits[pos..(pos+8)]).unwrap();
             packed_bits.push(full_byte);
@@ -29,18 +35,16 @@ impl From<&[Bit]> for Code {
         }
 
         // Pack the remaining bits
-        if rem_bits > 0 {
-            let mut incomplete_byte = 0u8;
-            while pos < bits.len() {
-                bit::push_bit(&mut incomplete_byte, bits[pos]);
-                pos += 1;
-            }
-            packed_bits.push(incomplete_byte);
+        let mut incomplete_byte = 0u8;
+        while pos < bits.len() {
+            bit::push_bit(&mut incomplete_byte, bits[pos]);
+            pos += 1;
         }
 
         Code {
-            bit_count: bits.len().try_into().unwrap(),
-            packed_bits
+            full_bytes:    packed_bits,
+            partial_count: rem_bits as u8,
+            partial_byte:  incomplete_byte
         }
     }
 }
@@ -68,17 +72,16 @@ impl<T: Hash + Eq> Enc<T> {
             return None;
         }
         let code = code.unwrap();
-        if code.packed_bits.len() == 0 {
+        if code.full_bytes.len() == 0 && code.partial_count == 0 {
             return Some(());
         }
 
-        for i in 0..(code.packed_bits.len() - 1) {
-            writer.write_byte(*code.packed_bits.get(i).unwrap());
-        }
+        code.full_bytes
+            .iter()
+            .for_each(|byte| writer.write_byte(*byte));
 
-        let incomplete_byte = *code.packed_bits.last().unwrap();
-        for j in (0..(code.bit_count % 8)).rev() {
-            writer.write(bit::nth(incomplete_byte, j as u8));
+        for j in (0..code.partial_count).rev() {
+            writer.write(bit::nth(code.partial_byte, j as u8));
         }
 
         return Some(());
@@ -87,6 +90,7 @@ impl<T: Hash + Eq> Enc<T> {
 
 /* Dec */
 
+#[derive(PartialEq, Eq, Debug)]
 pub struct Dec<T> {
     trie: BinTrie<T>
 }
@@ -164,6 +168,7 @@ pub fn build<I, T, N>(freq_items: I) -> (Enc<T>, Dec<T>)
 
 /* BinTrie */
 
+#[derive(PartialEq, Eq, Debug)]
 enum BinTrie<T> {
     Leaf(T),
     Branch(Box<BinTrie<T>>, Box<BinTrie<T>>)
@@ -290,93 +295,6 @@ impl<'a, T> BinTrieIter<'a, T> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::bit;
-    use bit::{Bit, WriteBit};
-
-    fn huf_abc() -> (super::Enc<char>, super::Dec<char>) {
-        super::build([('a', 2), ('b', 1), ('c', 1)].into_iter())
-    }
-
-    #[test]
-    fn builder_is_sane() {
-        let (enc, _) = huf_abc();
-        assert_eq!(enc.codes.len(), 3);
-        assert_eq!(enc.codes.len(), 3);
-    }
-
-    #[test]
-    fn bintrie_iter1() {
-        let trie = super::BinTrie::leaf(1);
-        let mut bti = trie.iter();
-        assert!(bti.next().is_some());
-        assert!(bti.next().is_none());
-    }
-
-    #[test]
-    fn bintrie_iter2() {
-        let trie =
-            super::BinTrie::compose(
-                Box::new(super::BinTrie::leaf(0)),
-                Box::new(super::BinTrie::leaf(1)));
-        let mut bti = trie.iter();
-
-        assert_eq!(bti.next(), Some((vec![Bit::Zero], &0)));
-        assert_eq!(bti.next(), Some((vec![Bit::One], &1)));
-        assert!(bti.next().is_none());
-    }
-
-    #[test]
-    fn code_lens1() {
-        let (enc, _) = huf_abc();
-        assert_eq!(enc.codes.get(&'a').map(|c| c.bit_count), Some(1));
-        assert_eq!(enc.codes.get(&'b').map(|c| c.bit_count), Some(2));
-        assert_eq!(enc.codes.get(&'c').map(|c| c.bit_count), Some(2));
-    }
-
-    fn enc_str(enc: &super::Enc<char>, s: &str) -> Vec<u8> {
-        let mut bw = bit::IoBitWriter::new(Vec::new());
-        for c in s.chars() {
-            enc.encode(&c, &mut bw);
-        }
-        bw.pad_and_flush();
-        return bw.into_inner();
-    }
-
-    #[test]
-    fn enc_dec1() {
-        let (enc, dec) = huf_abc();
-        let input = "a";
-
-        let message = enc_str(&enc, input);
-        let byte_iter = message.into_iter();
-        let mut bit_iter = byte_iter.flat_map(
-                            |n| bit::bit_array(n).into_iter().rev());
-
-        for c in input.chars() {
-            let decoded = dec.decode(&mut bit_iter);
-            assert_eq!(decoded, Some(&c));
-        }
-    }
-
-    #[test]
-    fn enc_dec2() {
-        let (enc, dec) = huf_abc();
-        let input = "abcabcaabbcc";
-
-        let message = enc_str(&enc, input);
-        let byte_iter = message.into_iter();
-        let mut bit_iter = byte_iter.flat_map(
-                            |n| bit::bit_array(n).into_iter().rev());
-
-        for c in input.chars() {
-            let decoded = dec.decode(&mut bit_iter);
-            assert_eq!(decoded, Some(&c));
-        }
-    }
-}
-
 /* Serialize / Deserialize */
 use std::io;
 use crate::ser::{Serialize, Deserialize};
@@ -432,5 +350,226 @@ impl<T: Deserialize> Deserialize for BinTrie<T> {
                 None // Failed to deserialize
             }
         }
+    }
+}
+
+/* Unit tests */
+
+#[cfg(test)]
+mod tests {
+    use super::bit;
+    use bit::{Bit, WriteBit};
+    use crate::ser::{Serialize, Deserialize};
+    use super::*;
+
+    fn huf_abc() -> (super::Enc<char>, super::Dec<char>) {
+        super::build([('a', 2), ('b', 1), ('c', 1)].into_iter())
+    }
+
+    #[test]
+    fn builder_is_sane() {
+        let (enc, _) = huf_abc();
+        assert_eq!(enc.codes.len(), 3);
+        assert_eq!(enc.codes.len(), 3);
+    }
+
+    #[test]
+    fn bintrie_iter1() {
+        let trie = super::BinTrie::leaf(1);
+        let mut bti = trie.iter();
+        assert!(bti.next().is_some());
+        assert!(bti.next().is_none());
+    }
+
+    #[test]
+    fn bintrie_iter2() {
+        let trie =
+            super::BinTrie::compose(
+                Box::new(super::BinTrie::leaf(0)),
+                Box::new(super::BinTrie::leaf(1)));
+        let mut bti = trie.iter();
+
+        assert_eq!(bti.next(), Some((vec![Bit::Zero], &0)));
+        assert_eq!(bti.next(), Some((vec![Bit::One], &1)));
+        assert!(bti.next().is_none());
+    }
+
+    #[test]
+    fn code_lens1() {
+        let (enc, _) = huf_abc();
+        /* FIXME use BitArray::bit_count() when available */
+        assert_eq!(enc.codes.get(&'a').map(|c| c.partial_count), Some(1));
+        assert_eq!(enc.codes.get(&'b').map(|c| c.partial_count), Some(2));
+        assert_eq!(enc.codes.get(&'c').map(|c| c.partial_count), Some(2));
+    }
+
+    fn enc_str(enc: &Enc<char>, s: &str) -> Vec<u8> {
+        let mut bw = bit::IoBitWriter::new(Vec::new());
+        for c in s.chars() {
+            enc.encode(&c, &mut bw);
+        }
+        bw.pad_and_flush();
+        return bw.into_inner();
+    }
+
+    #[test]
+    fn enc_dec1() {
+        let (enc, dec) = huf_abc();
+        let input = "a";
+
+        let message = enc_str(&enc, input);
+        let byte_iter = message.into_iter();
+        let mut bit_iter = byte_iter.flat_map(
+                            |n| bit::bit_array(n).into_iter().rev());
+
+        for c in input.chars() {
+            let decoded = dec.decode(&mut bit_iter);
+            assert_eq!(decoded, Some(&c));
+        }
+    }
+
+    #[test]
+    fn enc_dec2() {
+        let (enc, dec) = huf_abc();
+        let input = "abcabcaabbcc";
+
+        let message = enc_str(&enc, input);
+        let byte_iter = message.into_iter();
+        let mut bit_iter = byte_iter.flat_map(
+                            |n| bit::bit_array(n).into_iter().rev());
+
+        for c in input.chars() {
+            let decoded = dec.decode(&mut bit_iter);
+            assert_eq!(decoded, Some(&c));
+        }
+    }
+
+    #[test]
+    fn enc_dec3() {
+        let (enc, dec) = huf_abc();
+        let input = "abcabcaabbcc";
+
+        let mut ser_dec = Vec::new();
+        assert!(dec.serialize(&mut ser_dec).is_ok());
+        let dec2 = Deserialize::deserialize(&mut ser_dec.into_iter());
+        assert!(dec2.is_some());
+        let dec2: super::Dec<char> = dec2.unwrap();
+
+        let message = enc_str(&enc, input);
+        let byte_iter = message.into_iter();
+        let mut bit_iter = byte_iter.flat_map(
+                            |n| bit::bit_array(n).into_iter().rev());
+
+        for c in input.chars() {
+            let decoded = dec2.decode(&mut bit_iter);
+            assert_eq!(decoded, Some(&c));
+        }
+    }
+
+    #[test]
+    fn ser1() {
+        let (_enc, dec) = huf_abc();
+
+        let mut vec = Vec::new();
+        assert!(dec.serialize(&mut vec).is_ok());
+
+        let dec2 = Deserialize::deserialize(&mut vec.into_iter());
+        assert_eq!(dec2, Some(dec));
+    }
+
+    #[test]
+    fn bit_packing0() {
+        let packed = Code::from(&[Bit::Zero][..]);
+        let expected = Code {
+            full_bytes:    Vec::new(),
+            partial_count: 1,
+            partial_byte:  0
+        };
+        assert_eq!(packed, expected);
+    }
+
+    #[test]
+    fn bit_packing1() {
+        let packed = Code::from(&[Bit::One][..]);
+        let expected = Code {
+            full_bytes:    Vec::new(),
+            partial_count: 1,
+            partial_byte:  1
+        };
+        assert_eq!(packed, expected);
+    }
+
+    #[test]
+    fn bit_packing2() {
+        // 0xf0
+        let bit_array = [
+            Bit::One,  Bit::One,  Bit::One,  Bit::One,
+            Bit::Zero, Bit::Zero, Bit::Zero, Bit::Zero,
+        ];
+        let packed = Code::from(&bit_array[..]);
+        let expected = Code {
+            full_bytes:    vec![0xf0],
+            partial_count: 0,
+            partial_byte:  0
+        };
+        assert_eq!(packed, expected);
+    }
+
+    #[test]
+    fn bit_packing3() {
+        // 0xf0 + 0b1
+        let bit_array = [
+            Bit::One,  Bit::One,  Bit::One,  Bit::One,
+            Bit::Zero, Bit::Zero, Bit::Zero, Bit::Zero,
+            Bit::One,
+        ];
+        let packed = Code::from(&bit_array[..]);
+        let expected = Code {
+            full_bytes:    vec![0xf0],
+            partial_count: 1,
+            partial_byte:  1
+        };
+        assert_eq!(packed, expected);
+    }
+
+    #[test]
+    fn encode1() {
+        let mut codes = HashMap::new();
+
+        // 0b010
+        let bit_array = [Bit::Zero,  Bit::One,  Bit::Zero];
+        codes.insert('a', Code::from(&bit_array[..]));
+
+        // 0xf0 + 0b011
+        let bit_array = [
+            Bit::One,  Bit::One,  Bit::One,  Bit::One,
+            Bit::Zero, Bit::Zero, Bit::Zero, Bit::Zero,
+            Bit::Zero, Bit::One,  Bit::One,
+        ];
+        codes.insert('b', Code::from(&bit_array[..]));
+
+        // 0b00
+        let bit_array = [Bit::Zero,  Bit::Zero];
+        codes.insert('c', Code::from(&bit_array[..]));
+
+        let enc = Enc { codes };
+        let message = enc_str(&enc, "abc");
+        assert_eq!(message, vec![0x5e, 0x0c])
+    }
+
+    #[test]
+    fn encode2() {
+        let mut codes = HashMap::new();
+
+        // 0xf0
+        let bit_array = [
+            Bit::One,  Bit::One,  Bit::One,  Bit::One,
+            Bit::Zero, Bit::Zero, Bit::Zero, Bit::Zero,
+        ];
+        codes.insert('a', Code::from(&bit_array[..]));
+
+        let enc = Enc { codes };
+        let message = enc_str(&enc, "a");
+        assert_eq!(message, vec![0xf0])
     }
 }
