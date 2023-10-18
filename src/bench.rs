@@ -28,11 +28,21 @@ pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
             T::encode(&img, &mut data);
 
             let compressed_size = data.len();
+            println!("bench: Compressed size = {} bytes", compressed_size);
 
             let decoded = T::decode(&mut data.into_iter());
             match decoded {
                 Some(test) => {
                     if test != img {
+                        use image::GenericImageView;
+                        let mut px_pairs = test.pixels().zip(img.pixels());
+                        let first_difference = px_pairs.find(|(enc_px, exp_px)| enc_px != exp_px);
+                        eprintln!("First difference found: {:?}", first_difference);
+                        eprintln!("Follow {} differences", px_pairs.count());
+
+                        let mut second_encoding = Vec::new();
+                        T::encode(&img, &mut second_encoding);
+
                         return Err(String::from("Decoded image doesn't match"))
                     }
                 }
@@ -59,7 +69,7 @@ pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
 }
 
 fn csv_writer<T: Bench>() -> Result<csv::Writer<fs::File>, csv::Error> {
-    let mut csv_filename = String::from("data/");
+    let mut csv_filename = String::from("output/");
     csv_filename.push_str(&T::name());
     csv_filename.push_str(".csv");
 
