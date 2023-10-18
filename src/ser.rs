@@ -87,6 +87,24 @@ impl Deserialize for usize {
     }
 }
 
+/* char */
+/* FIXME we only support ascii atm */
+
+impl Serialize for char {
+    fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        let ascii: u8 = u8::try_from(*self)
+                            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        ascii.serialize(writer)
+    }
+}
+
+impl Deserialize for char {
+    fn deserialize<I: Iterator<Item = u8>>(stream: &mut I) -> Option<Self> {
+        let ascii: u8 = Deserialize::deserialize(stream)?;
+        Some(ascii.into())
+    }
+}
+
 /* Tuple2 */
 
 impl<T: Serialize, U: Serialize> Serialize for (T, U) {
