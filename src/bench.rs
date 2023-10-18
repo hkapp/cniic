@@ -1,14 +1,14 @@
-use std::fs::{self, File};
+use std::fs;
 use std::io;
 use std::fmt::Debug;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use image::GenericImageView;
 use bytesize::ByteSize;
 
 pub type Img = image::DynamicImage;
 
 pub trait Bench {
-    fn encode<W: io::Write>(img: &Img, writer: &mut W);
+    fn encode<W: io::Write>(img: &Img, writer: &mut W) -> io::Result<()>;
     fn decode<I: Iterator<Item = u8>>(reader: &mut I) -> Option<Img>;
     fn name() -> String;
 }
@@ -27,7 +27,8 @@ pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
                         .map_err(|e| format!("{:?}", e))?;
 
             let mut data = Vec::new();
-            T::encode(&img, &mut data);
+            T::encode(&img, &mut data)
+                .map_err(|e| format!("{:?}", e))?;
 
             let compressed_size = data.len();
             println!("bench: Compressed size = {}", ByteSize::b(compressed_size as u64));
@@ -41,14 +42,13 @@ pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
             match decoded {
                 Some(test) => {
                     if test != img {
+                        /* DEBUG begin
                         let mut px_pairs = test.pixels().zip(img.pixels());
                         let first_difference = px_pairs.find(|(enc_px, exp_px)| enc_px != exp_px);
                         eprintln!("First difference found: {:?}", first_difference);
                         eprintln!("Follow {} differences", px_pairs.count());
-
-                        let mut second_encoding = Vec::new();
-                        T::encode(&img, &mut second_encoding);
-
+                         * DEBUG end
+                         */
                         return Err(String::from("Decoded image doesn't match"))
                     }
                 }
@@ -87,4 +87,14 @@ fn print_err<T, E: Debug>(r: Result<T, E>) {
         Err(e) => eprintln!("{:?}", e),
         _      => (),
     }
+}
+
+#[allow(dead_code)]
+fn measure<F: FnOnce() -> T, T>(f: F, description: &str) -> T {
+    let start = std::time::Instant::now();
+    let res = f();
+    let duration = start.elapsed();
+
+    println!("{}: {:?}", description, duration);
+    return res;
 }
