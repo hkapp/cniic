@@ -21,10 +21,12 @@ impl From<&Bit> for u8 {
     }
 }
 
+// TODO add BitOrder argument
 pub fn push_bit(n: &mut u8, b: Bit) {
     *n = (*n << 1) | b.byte();
 }
 
+// TODO add BitOrder argument
 pub fn byte_from_slice(bits: &[Bit]) -> Option<u8> {
     if bits.len() != 8 {
         return None
@@ -38,6 +40,7 @@ pub fn byte_from_slice(bits: &[Bit]) -> Option<u8> {
     return Some(n);
 }
 
+// TODO add BitOrder argument
 pub fn nth(byte: u8, idx: u8) -> Bit {
     let masked = byte & (1u8 << idx);
     if masked == 0 {
@@ -48,6 +51,7 @@ pub fn nth(byte: u8, idx: u8) -> Bit {
     }
 }
 
+// TODO add BitOrder argument
 pub fn bit_array(byte: u8) -> [Bit; 8] {
     [
         nth(byte, 0),
@@ -62,6 +66,12 @@ pub fn bit_array(byte: u8) -> [Bit; 8] {
     ]
 }
 
+pub fn bit_mask(nbits: u8) -> u8 {
+    ((1u16 << nbits) - 1) as u8
+}
+
+/* trait WriteBit */
+
 pub trait WriteBit {
     fn write(&mut self, b: Bit) -> io::Result<()>;
 
@@ -74,6 +84,8 @@ pub trait WriteBit {
 
     fn pad_and_flush(&mut self) -> io::Result<()>;
 }
+
+/* IoBitWriter */
 
 pub struct IoBitWriter<W> {
     writer:    W,
@@ -119,12 +131,7 @@ impl<W: io::Write> WriteBit for IoBitWriter<W> {
             self.writer.write_all(&[completed_byte])?;
 
             // Note: this masking is actually not necessary
-            // TODO turn this into a more efficient API
-            let mut mask = 0u8;
-            for _ in 0..self.bit_count {
-                mask = (mask << 1) | 1;
-            }
-            self.curr_bits = n & mask;
+            self.curr_bits = n & bit_mask(self.bit_count);
         }
 
         Ok(())
@@ -205,5 +212,82 @@ mod tests {
         //                 = 0x5e0c
         assert_eq!(bw.into_inner(), vec![0x5e, 0x0c]);
         Ok(())
+    }
+
+    #[test]
+    fn bw_mask() -> io::Result<()> {
+        let mut bw = vec_bw();
+
+        // Write 0b0000
+        bw.write(Bit::Zero)?;
+        bw.write(Bit::Zero)?;
+        bw.write(Bit::Zero)?;
+        bw.write(Bit::Zero)?;
+
+        // Write 0b110
+        bw.write(Bit::One)?;
+        bw.write(Bit::One)?;
+        bw.write(Bit::Zero)?;
+
+        // Write 0xff
+        bw.write_byte(0xff)?;
+
+        // Write 0b0
+        bw.write(Bit::Zero)?;
+
+        // Total sequence is 0000 1101 1111 1110
+        //                 = 0x0dfe
+        assert_eq!(bw.into_inner(), vec![0x0d, 0xfe]);
+        Ok(())
+    }
+
+    #[test]
+    fn bit_mask0() {
+        assert_eq!(super::bit_mask(0), 0)
+    }
+
+    #[test]
+    fn bit_mask1() {
+        assert_eq!(super::bit_mask(1), 0b1)
+    }
+
+    #[test]
+    fn bit_mask2() {
+        assert_eq!(super::bit_mask(2), 0b11)
+    }
+
+    #[test]
+    fn bit_mask3() {
+        assert_eq!(super::bit_mask(3), 0b111)
+    }
+
+    #[test]
+    fn bit_mask4() {
+        assert_eq!(super::bit_mask(4), 0b1111)
+    }
+
+    #[test]
+    fn bit_mask5() {
+        assert_eq!(super::bit_mask(5), 0b11111)
+    }
+
+    #[test]
+    fn bit_mask6() {
+        assert_eq!(super::bit_mask(6), 0b111111)
+    }
+
+    #[test]
+    fn bit_mask7() {
+        assert_eq!(super::bit_mask(7), 0b1111111)
+    }
+
+    #[test]
+    fn bit_mask8() {
+        assert_eq!(super::bit_mask(8), 0b11111111)
+    }
+
+    #[test]
+    fn bit_mask9() {
+        assert_eq!(super::bit_mask(9), 0b11111111)
     }
 }
