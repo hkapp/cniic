@@ -1,26 +1,32 @@
 import sys
 import os
+import glob
 import pandas as pd
 import matplotlib.pyplot as plt
 
-if len(sys.argv) != 2:
-    print('Usage: ' + sys.argv[0] + ' <csv file>')
-    exit(1)
+csv_folder = 'output/'
 
-csv_path = sys.argv[1]
+# Retrieve the data and names from the various csv files
 
-csv_data = pd.read_csv(csv_path)
-print(csv_data)
+names = []
+data = []
 
+for csv_path in glob.glob(csv_folder + "*.csv"):
+    csv_data = pd.read_csv(csv_path)
+    data.append(csv_data["compression_ratio"])
+
+    # Go from 'dir/filename.csv' to 'filename'
+    file_name = os.path.split(csv_path)[1]
+    display_name = os.path.splitext(file_name)[0]
+    names.append(display_name)
+
+# Generate the plot
+
+plt.ylabel('Compression ratio (lower is better)')
 plt.ylim(0, 100)
 
-# Go from 'dir/filename.csv' to 'filename'
-file_name = os.path.split(csv_path)[1]
-display_name = os.path.splitext(file_name)[0]
-# https://stackoverflow.com/questions/37039685/hide-tick-label-values-but-keep-axis-labels
-plt.xticks(color='w')
-plt.xlabel(display_name)
+plt.gca().set_xticklabels(names)
 
-plt.boxplot(csv_data["compression_ratio"])
+plt.boxplot(data)
 plt.savefig("output/boxplot.png")
 plt.show()

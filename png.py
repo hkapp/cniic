@@ -18,4 +18,4 @@ with open(output_path, 'w') as csv_file:
         raw_size = w * h * 24   # see the comments in bench.rs
         compression_ratio = png_size / raw_size
 
-        csv_w.writerow([png_path, png_size, compression_ratio])
+        csv_w.writerow([png_path, png_size, compression_ratio * 100])
