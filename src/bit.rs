@@ -117,8 +117,10 @@ impl<W: std::io::Write> WriteBit for IoBitWriter<W> {
             //println!("completed_byte: 0x{:02x} ~ 0b{:08b}", completed_byte, completed_byte);
             self.writer.write_all(&[completed_byte]);
 
+            // Note: this masking is actually not necessary
+            // TODO turn this into a more efficient API
             let mut mask = 0u8;
-            for _ in 0..self.curr_bits {
+            for _ in 0..self.bit_count {
                 mask = (mask << 1) | 1;
             }
             self.curr_bits = n & mask;
