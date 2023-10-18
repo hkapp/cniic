@@ -1,3 +1,5 @@
+use std::io;
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Bit {
     Zero,
@@ -61,15 +63,16 @@ pub fn bit_array(byte: u8) -> [Bit; 8] {
 }
 
 pub trait WriteBit {
-    fn write(&mut self, b: Bit);
+    fn write(&mut self, b: Bit) -> io::Result<()>;
 
-    fn write_byte(&mut self, n: u8) {
+    fn write_byte(&mut self, n: u8) -> io::Result<()> {
         for b in bit_array(n).iter() {
-            self.write(*b);
+            self.write(*b)?;
         }
+        Ok(())
     }
 
-    fn pad_and_flush(&mut self);
+    fn pad_and_flush(&mut self) -> io::Result<()>;
 }
 
 pub struct IoBitWriter<W> {
@@ -92,30 +95,28 @@ impl<W> IoBitWriter<W> {
     }
 }
 
-impl<W: std::io::Write> WriteBit for IoBitWriter<W> {
-    fn write(&mut self, b: Bit) {
+impl<W: io::Write> WriteBit for IoBitWriter<W> {
+    fn write(&mut self, b: Bit) -> io::Result<()> {
         push_bit(&mut self.curr_bits, b);
 
         self.bit_count += 1;
         if self.bit_count == 8 {
-            self.writer.write_all(&[self.curr_bits]);
+            self.writer.write_all(&[self.curr_bits])?;
             self.bit_count = 0;
         }
+
+        Ok(())
     }
 
-    fn write_byte(&mut self, n: u8) {
-        //println!("curr_bits: 0x{:02x} ~ 0b{:08b}, bit_count: {}, new_byte: 0x{:02x}", self.curr_bits, self.curr_bits, self.bit_count, n);
+    fn write_byte(&mut self, n: u8) -> io::Result<()> {
         if self.bit_count == 0 {
-            self.writer.write_all(&[n]);
+            self.writer.write_all(&[n])?;
         }
         else {
             let msb = self.curr_bits << (8 - self.bit_count);
             let lsb = n >> self.bit_count;
             let completed_byte = msb | lsb;
-            //println!("msb: 0x{:02x} ~ 0b{:08b}", msb, msb);
-            //println!("lsb: 0x{:02x} ~ 0b{:08b}", lsb, lsb);
-            //println!("completed_byte: 0x{:02x} ~ 0b{:08b}", completed_byte, completed_byte);
-            self.writer.write_all(&[completed_byte]);
+            self.writer.write_all(&[completed_byte])?;
 
             // Note: this masking is actually not necessary
             // TODO turn this into a more efficient API
@@ -124,27 +125,28 @@ impl<W: std::io::Write> WriteBit for IoBitWriter<W> {
                 mask = (mask << 1) | 1;
             }
             self.curr_bits = n & mask;
-            //println!("curr_bits: 0x{:02x}, bit_count: {}, new_byte: 0x{:02x}", self.curr_bits, self.bit_count, n);
         }
+
+        Ok(())
     }
 
     #[allow(unused_parens)]
-    fn pad_and_flush(&mut self) {
+    fn pad_and_flush(&mut self) -> io::Result<()> {
         if self.bit_count != 0 {
             // Pad the remains with 0s
             self.curr_bits <<= (8 - self.bit_count);
-            self.writer.write_all(&[self.curr_bits]);
+            self.writer.write_all(&[self.curr_bits])?;
 
             self.curr_bits = 0;
             self.bit_count = 0;
         }
-        self.writer.flush();
+        self.writer.flush()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Bit, IoBitWriter, WriteBit};
+    use super::*;
 
     #[test]
     fn byte_of_b0() {
@@ -161,44 +163,47 @@ mod tests {
     }
 
     #[test]
-    fn write_x00() {
+    fn write_x00() -> io::Result<()> {
         let mut bw = vec_bw();
         for _ in 0..8 {
-            bw.write(Bit::Zero);
+            bw.write(Bit::Zero)?;
         }
         assert_eq!(bw.into_inner(), vec![0]);
+        Ok(())
     }
 
     #[test]
-    fn write_xff() {
+    fn write_xff() -> io::Result<()> {
         let mut bw = vec_bw();
         for _ in 0..8 {
-            bw.write(Bit::One);
+            bw.write(Bit::One)?;
         }
         assert_eq!(bw.into_inner(), vec![0xffu8]);
+        Ok(())
     }
 
     #[test]
-    fn interleaved_byte() {
+    fn interleaved_byte() -> io::Result<()> {
         let mut bw = vec_bw();
 
         // Write 0b010
-        bw.write(Bit::Zero);
-        bw.write(Bit::One);
-        bw.write(Bit::Zero);
+        bw.write(Bit::Zero)?;
+        bw.write(Bit::One)?;
+        bw.write(Bit::Zero)?;
 
         // Write 0xf0
-        bw.write_byte(0xf0);
+        bw.write_byte(0xf0)?;
 
         // Write 0b01100
-        bw.write(Bit::Zero);
-        bw.write(Bit::One);
-        bw.write(Bit::One);
-        bw.write(Bit::Zero);
-        bw.write(Bit::Zero);
+        bw.write(Bit::Zero)?;
+        bw.write(Bit::One)?;
+        bw.write(Bit::One)?;
+        bw.write(Bit::Zero)?;
+        bw.write(Bit::Zero)?;
 
         // Total sequence is 0101 1110 0000 1100
         //                 = 0x5e0c
         assert_eq!(bw.into_inner(), vec![0x5e, 0x0c]);
+        Ok(())
     }
 }

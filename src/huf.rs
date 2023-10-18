@@ -76,12 +76,16 @@ impl<T: Hash + Eq> Enc<T> {
             return Some(());
         }
 
-        code.full_bytes
-            .iter()
-            .for_each(|byte| writer.write_byte(*byte));
+        for byte in code.full_bytes.iter() {
+            writer.write_byte(*byte)
+                .map_err(|e| eprintln!("{:?}", e))
+                .ok()?;
+        }
 
         for j in (0..code.partial_count).rev() {
-            writer.write(bit::nth(code.partial_byte, j as u8));
+            writer.write(bit::nth(code.partial_byte, j as u8))
+                .map_err(|e| eprintln!("{:?}", e))
+                .ok()?;
         }
 
         return Some(());
@@ -408,7 +412,7 @@ mod tests {
         for c in s.chars() {
             enc.encode(&c, &mut bw);
         }
-        bw.pad_and_flush();
+        assert!(bw.pad_and_flush().is_ok());
         return bw.into_inner();
     }
 
