@@ -32,7 +32,7 @@ impl bench::Bench for Hufman {
         img.dimensions().serialize(writer)?;
 
         // Now write the data
-        let mut bw = bit::IoBitWriter::new(writer);
+        let mut bw = bit::IoBitWriter::new(writer, huf::BIT_ORDER);
         let mut px_counter = 0;
         for px in pixels_iter() {
             if px_counter == 296 {
@@ -65,7 +65,7 @@ impl bench::Bench for Hufman {
         // Read the data and create the image
         // FIXME introduce MsbFirst / LsbFirst
         let mut bits = reader.flat_map(
-                            |n| bit::bit_array(n).into_iter().rev());
+                            |n| bit::bit_array(n, huf::BIT_ORDER).into_iter());
         let mut img = image::RgbImage::new(dims.0, dims.1);
         for px in img.pixels_mut() {
             match dec.decode(&mut bits) {
