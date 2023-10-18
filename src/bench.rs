@@ -2,6 +2,8 @@ use std::fs::{self, File};
 use std::io;
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
+use image::GenericImageView;
+use bytesize::ByteSize;
 
 pub type Img = image::DynamicImage;
 
@@ -28,13 +30,17 @@ pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
             T::encode(&img, &mut data);
 
             let compressed_size = data.len();
-            println!("bench: Compressed size = {} bytes", compressed_size);
+            println!("bench: Compressed size = {}", ByteSize::b(compressed_size as u64));
+
+            let (h, w) = img.dimensions();
+            let raw_size = h * w * 24; // we're counting on 3 bytes RGB pixels
+            println!("bench: Raw size = {}", ByteSize::b(raw_size as u64));
+            let compression_ratio = (compressed_size as f64) / (raw_size as f64);
 
             let decoded = T::decode(&mut data.into_iter());
             match decoded {
                 Some(test) => {
                     if test != img {
-                        use image::GenericImageView;
                         let mut px_pairs = test.pixels().zip(img.pixels());
                         let first_difference = px_pairs.find(|(enc_px, exp_px)| enc_px != exp_px);
                         eprintln!("First difference found: {:?}", first_difference);
@@ -52,13 +58,13 @@ pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
             }
 
             if !wrote_header {
-                csv.write_record(&["name", "compressed_size"])
+                csv.write_record(&["name", "compressed_size", "compression_ratio"])
                     .map_err(|e| format!("{:?}", e))?;
                 wrote_header = true;
             }
 
             let file_name = p.as_ref().to_str().unwrap_or("???");
-            csv.serialize((file_name, compressed_size))
+            csv.serialize((file_name, compressed_size, compression_ratio))
                 .map_err(|e| format!("{:?}", e))?;
             Ok(())
         })
