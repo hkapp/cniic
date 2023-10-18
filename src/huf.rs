@@ -3,8 +3,10 @@ use std::collections::{HashMap, BinaryHeap};
 use std::hash::Hash;
 use std::ops::Add;
 
-use crate::bit::Bit;
+use crate::bit::{Bit, BitOrder};
 use crate::bit;
+
+pub const BIT_ORDER: BitOrder = BitOrder::MsbFirst;
 
 /* Enc */
 
@@ -28,7 +30,7 @@ impl From<&[Bit]> for Code {
         // Pack the bits 8-by-8 as long as possible
         /* TODO make this into a bit module interface */
         while rem_bits >= 8 {
-            let full_byte = bit::byte_from_slice(&bits[pos..(pos+8)]).unwrap();
+            let full_byte = bit::byte_from_slice(&bits[pos..(pos+8)], BIT_ORDER).unwrap();
             packed_bits.push(full_byte);
             pos += 8;
             rem_bits -= 8;
@@ -37,7 +39,7 @@ impl From<&[Bit]> for Code {
         // Pack the remaining bits
         let mut incomplete_byte = 0u8;
         while pos < bits.len() {
-            bit::push_bit(&mut incomplete_byte, bits[pos]);
+            bit::push_bit(&mut incomplete_byte, bits[pos], BIT_ORDER);
             pos += 1;
         }
 
@@ -82,8 +84,13 @@ impl<T: Hash + Eq> Enc<T> {
                 .ok()?;
         }
 
-        for j in (0..code.partial_count).rev() {
-            writer.write(bit::nth(code.partial_byte, j as u8))
+        /* Read the remaining bits:
+         *   xxxx x010
+         *         012
+         */
+        let starting_bit: u8 = 8 - code.partial_count;
+        for j in starting_bit..8 {
+            writer.write(bit::nth(code.partial_byte, j, BIT_ORDER))
                 .map_err(|e| eprintln!("{:?}", e))
                 .ok()?;
         }
@@ -408,7 +415,7 @@ mod tests {
     }
 
     fn enc_str(enc: &Enc<char>, s: &str) -> Vec<u8> {
-        let mut bw = bit::IoBitWriter::new(Vec::new());
+        let mut bw = bit::IoBitWriter::new(Vec::new(), super::BIT_ORDER);
         for c in s.chars() {
             enc.encode(&c, &mut bw);
         }
@@ -424,7 +431,7 @@ mod tests {
         let message = enc_str(&enc, input);
         let byte_iter = message.into_iter();
         let mut bit_iter = byte_iter.flat_map(
-                            |n| bit::bit_array(n).into_iter().rev());
+                            |n| bit::bit_array(n, super::BIT_ORDER).into_iter());
 
         for c in input.chars() {
             let decoded = dec.decode(&mut bit_iter);
@@ -440,7 +447,7 @@ mod tests {
         let message = enc_str(&enc, input);
         let byte_iter = message.into_iter();
         let mut bit_iter = byte_iter.flat_map(
-                            |n| bit::bit_array(n).into_iter().rev());
+                            |n| bit::bit_array(n, super::BIT_ORDER).into_iter());
 
         for c in input.chars() {
             let decoded = dec.decode(&mut bit_iter);
@@ -462,7 +469,7 @@ mod tests {
         let message = enc_str(&enc, input);
         let byte_iter = message.into_iter();
         let mut bit_iter = byte_iter.flat_map(
-                            |n| bit::bit_array(n).into_iter().rev());
+                            |n| bit::bit_array(n, super::BIT_ORDER).into_iter());
 
         for c in input.chars() {
             let decoded = dec2.decode(&mut bit_iter);

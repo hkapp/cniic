@@ -21,28 +21,61 @@ impl From<&Bit> for u8 {
     }
 }
 
-// TODO add BitOrder argument
-pub fn push_bit(n: &mut u8, b: Bit) {
-    *n = (*n << 1) | b.byte();
+#[derive(Clone, Copy)]
+pub enum BitOrder {
+    /* Most Significant Bit first
+     * Bit indexes:
+     *   0123 4567
+     */
+    MsbFirst,
+    /* Least Significant Bit first
+     * Bit indexes:
+     *   7654 3210
+     */
+    LsbFirst,
 }
 
-// TODO add BitOrder argument
-pub fn byte_from_slice(bits: &[Bit]) -> Option<u8> {
+pub fn push_bit(n: &mut u8, b: Bit, bo: BitOrder) {
+    match bo {
+        /* If you're using bytes in Msb order it makes sense to do this:
+         *
+         * 0123 4567 << x
+         * 1234 567x
+         */
+        BitOrder::MsbFirst => {
+            *n = (*n << 1) | b.byte();
+        }
+        // The logic here is the opposite of the above case
+        BitOrder::LsbFirst => {
+            *n = (*n >> 1) | (b.byte() << 7);
+        }
+    }
+}
+
+pub fn byte_from_slice(bits: &[Bit], bo: BitOrder) -> Option<u8> {
     if bits.len() != 8 {
         return None
     }
 
     let mut n = 0u8;
     for b in bits {
-        push_bit(&mut n, *b);
+        push_bit(&mut n, *b, bo);
     }
 
     return Some(n);
 }
 
-// TODO add BitOrder argument
-pub fn nth(byte: u8, idx: u8) -> Bit {
-    let masked = byte & (1u8 << idx);
+#[allow(unused_parens)]
+pub fn nth(byte: u8, idx: u8, bo: BitOrder) -> Bit {
+    let mask =
+        match bo {
+            // 7654 3210
+            BitOrder::LsbFirst => (1u8 << idx),
+            // 0123 4567
+            BitOrder::MsbFirst => (0x80 >> idx),
+        };
+
+    let masked = byte & mask;
     if masked == 0 {
         Bit::Zero
     }
@@ -51,21 +84,21 @@ pub fn nth(byte: u8, idx: u8) -> Bit {
     }
 }
 
-// TODO add BitOrder argument
-pub fn bit_array(byte: u8) -> [Bit; 8] {
+pub fn bit_array(byte: u8, bo: BitOrder) -> [Bit; 8] {
     [
-        nth(byte, 0),
-        nth(byte, 1),
-        nth(byte, 2),
-        nth(byte, 3),
+        nth(byte, 0, bo),
+        nth(byte, 1, bo),
+        nth(byte, 2, bo),
+        nth(byte, 3, bo),
 
-        nth(byte, 4),
-        nth(byte, 5),
-        nth(byte, 6),
-        nth(byte, 7),
+        nth(byte, 4, bo),
+        nth(byte, 5, bo),
+        nth(byte, 6, bo),
+        nth(byte, 7, bo),
     ]
 }
 
+// TODO add a BitOrder argument
 pub fn bit_mask(nbits: u8) -> u8 {
     ((1u16 << nbits) - 1) as u8
 }
@@ -75,12 +108,7 @@ pub fn bit_mask(nbits: u8) -> u8 {
 pub trait WriteBit {
     fn write(&mut self, b: Bit) -> io::Result<()>;
 
-    fn write_byte(&mut self, n: u8) -> io::Result<()> {
-        for b in bit_array(n).iter() {
-            self.write(*b)?;
-        }
-        Ok(())
-    }
+    fn write_byte(&mut self, n: u8) -> io::Result<()>;
 
     fn pad_and_flush(&mut self) -> io::Result<()>;
 }
@@ -90,15 +118,17 @@ pub trait WriteBit {
 pub struct IoBitWriter<W> {
     writer:    W,
     curr_bits: u8,
-    bit_count: u8
+    bit_count: u8,
+    bit_order: BitOrder,
 }
 
 impl<W> IoBitWriter<W> {
-    pub fn new(writer: W) -> Self {
+    pub fn new(writer: W, bo: BitOrder) -> Self {
         IoBitWriter {
             writer,
             curr_bits: 0,
-            bit_count: 0
+            bit_count: 0,
+            bit_order: bo
         }
     }
 
@@ -109,7 +139,7 @@ impl<W> IoBitWriter<W> {
 
 impl<W: io::Write> WriteBit for IoBitWriter<W> {
     fn write(&mut self, b: Bit) -> io::Result<()> {
-        push_bit(&mut self.curr_bits, b);
+        push_bit(&mut self.curr_bits, b, self.bit_order);
 
         self.bit_count += 1;
         if self.bit_count == 8 {
@@ -125,6 +155,7 @@ impl<W: io::Write> WriteBit for IoBitWriter<W> {
             self.writer.write_all(&[n])?;
         }
         else {
+            // FIXME this is specific to Msb ordering
             let msb = self.curr_bits << (8 - self.bit_count);
             let lsb = n >> self.bit_count;
             let completed_byte = msb | lsb;
@@ -166,7 +197,7 @@ mod tests {
     }
 
     fn vec_bw() -> IoBitWriter<Vec<u8>> {
-        IoBitWriter::new(Vec::new())
+        IoBitWriter::new(Vec::new(), BitOrder::MsbFirst)
     }
 
     #[test]
@@ -289,5 +320,35 @@ mod tests {
     #[test]
     fn bit_mask9() {
         assert_eq!(super::bit_mask(9), 0b11111111)
+    }
+
+    #[test]
+    fn nth_lsb() {
+        let byte = 0b10110010;
+        //           76543210
+        assert_eq!(super::nth(byte, 0, BitOrder::LsbFirst), Bit::Zero);
+        assert_eq!(super::nth(byte, 1, BitOrder::LsbFirst), Bit::One) ;
+        assert_eq!(super::nth(byte, 2, BitOrder::LsbFirst), Bit::Zero);
+        assert_eq!(super::nth(byte, 3, BitOrder::LsbFirst), Bit::Zero);
+
+        assert_eq!(super::nth(byte, 4, BitOrder::LsbFirst), Bit::One) ;
+        assert_eq!(super::nth(byte, 5, BitOrder::LsbFirst), Bit::One) ;
+        assert_eq!(super::nth(byte, 6, BitOrder::LsbFirst), Bit::Zero);
+        assert_eq!(super::nth(byte, 7, BitOrder::LsbFirst), Bit::One) ;
+    }
+
+    #[test]
+    fn nth_msb() {
+        let byte = 0b10110010;
+        //           01234567
+        assert_eq!(super::nth(byte, 0, BitOrder::MsbFirst), Bit::One) ;
+        assert_eq!(super::nth(byte, 1, BitOrder::MsbFirst), Bit::Zero);
+        assert_eq!(super::nth(byte, 2, BitOrder::MsbFirst), Bit::One) ;
+        assert_eq!(super::nth(byte, 3, BitOrder::MsbFirst), Bit::One) ;
+
+        assert_eq!(super::nth(byte, 4, BitOrder::MsbFirst), Bit::Zero);
+        assert_eq!(super::nth(byte, 5, BitOrder::MsbFirst), Bit::Zero);
+        assert_eq!(super::nth(byte, 6, BitOrder::MsbFirst), Bit::One) ;
+        assert_eq!(super::nth(byte, 7, BitOrder::MsbFirst), Bit::Zero);
     }
 }
