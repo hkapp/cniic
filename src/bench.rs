@@ -64,7 +64,7 @@ pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
             }
 
             let file_name = p.as_ref().to_str().unwrap_or("???");
-            csv.serialize((file_name, compressed_size, compression_ratio))
+            csv.serialize((file_name, compressed_size, compression_ratio * 100.0))
                 .map_err(|e| format!("{:?}", e))?;
             Ok(())
         })
