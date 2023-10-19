@@ -59,11 +59,9 @@ impl bench::Bench for Hufman {
         let dec: huf::Dec<image::Rgb<u8>> = Deserialize::deserialize(reader)?;
 
         // Read the dimensions of the image
-        // TODO make the dims into a type
         let dims: (u32, u32) = Deserialize::deserialize(reader)?;
 
         // Read the data and create the image
-        // FIXME introduce MsbFirst / LsbFirst
         let mut bits = reader.flat_map(
                             |n| bit::bit_array(n, huf::BIT_ORDER).into_iter());
         let mut img = image::RgbImage::new(dims.0, dims.1);
