@@ -3,63 +3,22 @@ use std::collections::{HashMap, BinaryHeap};
 use std::hash::Hash;
 use std::ops::Add;
 
-use crate::bit::{Bit, BitOrder};
+use crate::bit::{Bit, BitOrder, BitArray};
 use crate::bit;
 
 pub const BIT_ORDER: BitOrder = BitOrder::MsbFirst;
 
 /* Enc */
 
-// The bits in this data structure are packed into bytes
-// This packing is done MSB first
-// TODO consider moving this to the bit module (e.g. BitArray)
-// Note: then it can be used for the IoBitWriter
-#[derive(PartialEq, Eq, Debug)]
-struct Code {
-    full_bytes:      Vec<u8>,
-    partial_count:   u8,
-    partial_byte:    u8,
-}
-
-impl From<&[Bit]> for Code {
-    fn from(bits: &[Bit]) -> Self {
-        let mut packed_bits = Vec::new();
-        let mut rem_bits = bits.len();
-        let mut pos = 0;
-
-        // Pack the bits 8-by-8 as long as possible
-        /* TODO make this into a bit module interface */
-        while rem_bits >= 8 {
-            let full_byte = bit::byte_from_slice(&bits[pos..(pos+8)], BIT_ORDER).unwrap();
-            packed_bits.push(full_byte);
-            pos += 8;
-            rem_bits -= 8;
-        }
-
-        // Pack the remaining bits
-        let mut incomplete_byte = 0u8;
-        while pos < bits.len() {
-            bit::push_bit(&mut incomplete_byte, bits[pos], BIT_ORDER);
-            pos += 1;
-        }
-
-        Code {
-            full_bytes:    packed_bits,
-            partial_count: rem_bits as u8,
-            partial_byte:  incomplete_byte
-        }
-    }
-}
-
 pub struct Enc<T> {
-    codes: HashMap<T, Code>
+    codes: HashMap<T, BitArray>
 }
 
 impl<T: Hash + Eq + Clone> From<&Dec<T>> for Enc<T> {
     fn from(enc: &Dec<T>) -> Self {
         let mut codes = HashMap::new();
         for (bits, symbol) in enc.trie.iter() {
-            codes.insert(symbol.clone(), Code::from(&bits as &[Bit]));
+            codes.insert(symbol.clone(), BitArray::from_slice(&bits as &[Bit], BIT_ORDER));
         }
         Enc {
             codes
@@ -69,33 +28,14 @@ impl<T: Hash + Eq + Clone> From<&Dec<T>> for Enc<T> {
 
 impl<T: Hash + Eq> Enc<T> {
     pub fn encode<W: bit::WriteBit>(&self, symbol: &T, writer: &mut W) -> Option<()> {
-        let code = self.codes.get(symbol);
-        if code.is_none() {
-            return None;
-        }
-        let code = code.unwrap();
-        if code.full_bytes.len() == 0 && code.partial_count == 0 {
+        let code = self.codes.get(symbol)?;
+        if code.len() == 0 {
             return Some(());
         }
 
-        for byte in code.full_bytes.iter() {
-            writer.write_byte(*byte)
-                .map_err(|e| eprintln!("{:?}", e))
-                .ok()?;
-        }
-
-        /* Read the remaining bits:
-         *   xxxx x010
-         *         012
-         */
-        let starting_bit: u8 = 8 - code.partial_count;
-        for j in starting_bit..8 {
-            writer.write(bit::nth(code.partial_byte, j, BIT_ORDER))
-                .map_err(|e| eprintln!("{:?}", e))
-                .ok()?;
-        }
-
-        return Some(());
+        writer.write_arr(code)
+            .map_err(|e| eprintln!("{:?}", e))
+            .ok()
     }
 }
 
@@ -408,10 +348,10 @@ mod tests {
     #[test]
     fn code_lens1() {
         let (enc, _) = huf_abc();
-        /* FIXME use BitArray::bit_count() when available */
-        assert_eq!(enc.codes.get(&'a').map(|c| c.partial_count), Some(1));
-        assert_eq!(enc.codes.get(&'b').map(|c| c.partial_count), Some(2));
-        assert_eq!(enc.codes.get(&'c').map(|c| c.partial_count), Some(2));
+
+        assert_eq!(enc.codes.get(&'a').map(|c| c.len()), Some(1));
+        assert_eq!(enc.codes.get(&'b').map(|c| c.len()), Some(2));
+        assert_eq!(enc.codes.get(&'c').map(|c| c.len()), Some(2));
     }
 
     fn enc_str(enc: &Enc<char>, s: &str) -> Vec<u8> {
@@ -489,67 +429,12 @@ mod tests {
     }
 
     #[test]
-    fn bit_packing0() {
-        let packed = Code::from(&[Bit::Zero][..]);
-        let expected = Code {
-            full_bytes:    Vec::new(),
-            partial_count: 1,
-            partial_byte:  0
-        };
-        assert_eq!(packed, expected);
-    }
-
-    #[test]
-    fn bit_packing1() {
-        let packed = Code::from(&[Bit::One][..]);
-        let expected = Code {
-            full_bytes:    Vec::new(),
-            partial_count: 1,
-            partial_byte:  1
-        };
-        assert_eq!(packed, expected);
-    }
-
-    #[test]
-    fn bit_packing2() {
-        // 0xf0
-        let bit_array = [
-            Bit::One,  Bit::One,  Bit::One,  Bit::One,
-            Bit::Zero, Bit::Zero, Bit::Zero, Bit::Zero,
-        ];
-        let packed = Code::from(&bit_array[..]);
-        let expected = Code {
-            full_bytes:    vec![0xf0],
-            partial_count: 0,
-            partial_byte:  0
-        };
-        assert_eq!(packed, expected);
-    }
-
-    #[test]
-    fn bit_packing3() {
-        // 0xf0 + 0b1
-        let bit_array = [
-            Bit::One,  Bit::One,  Bit::One,  Bit::One,
-            Bit::Zero, Bit::Zero, Bit::Zero, Bit::Zero,
-            Bit::One,
-        ];
-        let packed = Code::from(&bit_array[..]);
-        let expected = Code {
-            full_bytes:    vec![0xf0],
-            partial_count: 1,
-            partial_byte:  1
-        };
-        assert_eq!(packed, expected);
-    }
-
-    #[test]
     fn encode1() {
         let mut codes = HashMap::new();
 
         // 0b010
         let bit_array = [Bit::Zero,  Bit::One,  Bit::Zero];
-        codes.insert('a', Code::from(&bit_array[..]));
+        codes.insert('a', BitArray::from_slice(&bit_array[..], BIT_ORDER));
 
         // 0xf0 + 0b011
         let bit_array = [
@@ -557,11 +442,11 @@ mod tests {
             Bit::Zero, Bit::Zero, Bit::Zero, Bit::Zero,
             Bit::Zero, Bit::One,  Bit::One,
         ];
-        codes.insert('b', Code::from(&bit_array[..]));
+        codes.insert('b', BitArray::from_slice(&bit_array[..], BIT_ORDER));
 
         // 0b00
         let bit_array = [Bit::Zero,  Bit::Zero];
-        codes.insert('c', Code::from(&bit_array[..]));
+        codes.insert('c', BitArray::from_slice(&bit_array[..], BIT_ORDER));
 
         let enc = Enc { codes };
         let message = enc_str(&enc, "abc");
@@ -577,7 +462,7 @@ mod tests {
             Bit::One,  Bit::One,  Bit::One,  Bit::One,
             Bit::Zero, Bit::Zero, Bit::Zero, Bit::Zero,
         ];
-        codes.insert('a', Code::from(&bit_array[..]));
+        codes.insert('a', BitArray::from_slice(&bit_array[..], BIT_ORDER));
 
         let enc = Enc { codes };
         let message = enc_str(&enc, "a");
