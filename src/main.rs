@@ -1,6 +1,7 @@
 mod bench;
 mod bit;
 mod huf;
+mod kmeans;
 mod utils;
 mod ser;
 
