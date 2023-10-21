@@ -27,6 +27,6 @@ plt.ylim(0, 100)
 
 plt.gca().set_xticklabels(names)
 
-plt.boxplot(data)
+plt.boxplot(data, showmeans=True)
 plt.savefig("output/boxplot.png")
 plt.show()
