@@ -17,20 +17,22 @@ for png_name in os.listdir(data_dir):
     stats.setdefault("png_size", []).append(png_size / 1e6)
 
     png_img = Image.open(png_path)
+    # dimensions
     (w, h) = png_img.size
     dims = str(w) + 'x' + str(h)
     dims_count = dimensions.get(dims, 0) + 1
     dimensions[dims] = dims_count
-    # raw_size = w * h * 24   # see the comments in bench.rs
-    # compression_ratio = png_size / raw_size
+
+    # ncolors
+    stats.setdefault("ncolors", []).append(len(png_img.getcolors(w*h)))
 
 # Generate the plot
 
-fig, subp = plt.subplots(1, 2, figsize=(10, 5))
+fig, subp = plt.subplots(1, 3, figsize=(15, 5))
 
 # png_size
 p = subp[0]
-p.boxplot(stats.values(), showmeans=True)
+p.boxplot(stats["png_size"], showmeans=True)
 p.set_ylabel('Size (MB)')
 p.set_title('png_size')
 
@@ -49,9 +51,15 @@ bar_values.append(len(sorted_values) - first_single)
 p.bar(bar_keys, bar_values)
 p.set_title('dimensions')
 p.set_xticklabels(bar_keys, rotation=60)
-
 # Make enough space for the rotated labels
 plt.subplots_adjust(bottom=0.20)
+
+# ncolors
+p = subp[2]
+print(stats["ncolors"])
+p.boxplot(stats["ncolors"], showmeans=True)
+p.set_ylabel('Number of colors')
+p.set_title('ncolors')
 
 plt.savefig("output/png_stats.png")
 plt.show()
