@@ -9,7 +9,7 @@ pub trait Point: Sized {
 pub struct Clusters<T> {
     centroids:       Vec<T>,
     assignment:      Vec<Vec<T>>,
-    certainty_radii: Vec<f64>,
+    neighbours:      Vec<Vec<(usize, f64)>>, // ordered
 }
 
 /* K-Means algorithm */
@@ -26,7 +26,7 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
         changed_assignment = assign_points(&mut clusters);
         // WARNING: always compute the centroids: the caller can use them
         update_centroids(&mut clusters);
-        update_certainty_radii(&mut clusters);
+        update_neighbours(&mut clusters);
         i += 1;
     }
     println!("#iterations: {}", i);
@@ -59,13 +59,13 @@ fn init<T, I>(points: &mut I, nclusters: usize) -> Clusters<T>
         T: Point
 {
     let assignment = init_assignment(points, nclusters);
-    let centroids = init_centroids(&assignment);
-    let certainty_radii = init_certainty_radii(&centroids);
+    let centroids  = init_centroids(&assignment);
+    let neighbours = init_neighbours(&centroids);
 
     Clusters {
         assignment,
         centroids,
-        certainty_radii
+        neighbours
     }
 }
 
@@ -90,32 +90,33 @@ fn update_centroids<T: Point>(clusters: &mut Clusters<T>) {
     compute_centroids(&clusters.assignment, &mut clusters.centroids);
 }
 
-/* certainty radii */
+/* neighbours */
 
-fn init_certainty_radii<T: Point>(centroids: &[T]) -> Vec<f64> {
+type Neighbours = Vec<Vec<(usize, f64)>>;
+
+fn init_neighbours<T: Point>(centroids: &[T]) -> Neighbours {
     let nclusters = centroids.len();
-    let mut radii = Vec::with_capacity(nclusters);
-    compute_certainty_radii(&centroids, &mut radii);
-    return radii;
+    let mut neighbours = Vec::with_capacity(nclusters);
+    compute_neighbours(&centroids, &mut neighbours);
+    return neighbours;
 }
 
-fn compute_certainty_radii<T: Point>(centroids: &[T], radii: &mut Vec<f64>) {
+fn compute_neighbours<T: Point>(centroids: &[T], neighbours: &mut Neighbours) {
     for (i, c) in centroids.iter().enumerate() {
-        let closest_dist = centroids.iter()
-                            .enumerate()
-                            .filter(|(other_idx, _)| *other_idx != i)  // we really want it to be different
-                            .map(|(_, other)| c.dist(other))
-                            .min_by(|a, b| a.partial_cmp(b).unwrap())
-                            .unwrap_or(0.0);
-        let certainty_radius = closest_dist / 2.0;
-        radii.push(certainty_radius);
+        let mut neighbour_dists: Vec<_> = centroids.iter()
+                                            .enumerate()
+                                            .filter(|(other_idx, _)| *other_idx != i)  // we really want it to be different
+                                            .map(|(other_idx, other)| (other_idx, c.dist(other)))
+                                            .collect();
+        neighbour_dists.sort_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
+        neighbours.push(neighbour_dists);
     }
 }
 
-fn update_certainty_radii<T: Point>(clusters: &mut Clusters<T>) {
+fn update_neighbours<T: Point>(clusters: &mut Clusters<T>) {
     // Note: Vec::clear() keeps the underlying allocated buffer, which is what we want
-    clusters.certainty_radii.clear();
-    compute_certainty_radii(&clusters.centroids, &mut clusters.certainty_radii);
+    clusters.neighbours.clear();
+    compute_neighbours(&clusters.centroids, &mut clusters.neighbours);
 }
 
 /* point assignment */
@@ -138,31 +139,45 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
                             .flat_map(|(i, v)| v.into_iter()
                                                 .map(move |x| (i, x)))
     {
-        // Find the closest centroid
-        // Note that we can't use Iterator::min_by_key() because f64 is only PartialOrd
-        // https://stackoverflow.com/questions/69665188/min-max-of-vecf64-trait-ord-is-not-implemented-for-xy
-        let mut min_dist = f64::INFINITY;
-        let mut closest_idx = None;
-        for m in 0..clusters.len() {
-            // start from the current cluster for this point
-            let tsi = (m + cci) % clusters.len();
-            let t_centroid = &clusters.centroids[tsi];
-            let t_dist = t_centroid.dist(&x);
+        // Start with the current centroid
+        let current_cluster = &clusters.centroids[cci];
+        let mut min_dist = current_cluster.dist(&x);
+        let mut closest_idx = Some(cci);
 
-            if t_dist < min_dist {
-                min_dist = t_dist;
-                closest_idx = Some(tsi);
-            }
+        // Check if we can early stop
+        // TODO remove this 'if', it should be duplicate of the c_to_c_dist test below
+        if min_dist <= clusters.certainty_radius(cci) {
+            early_stop_count += 1;
+        }
+        else {
+            // TODO: explain this
+            let cluster_cutoff = 2.0 * min_dist;
 
-            // Check if we can early stop
-            if t_dist <= clusters.certainty_radii[tsi] {
-                if closest_idx != Some(tsi) {
-                    // The only case that seems to make sense is when the distance is equal
-                    assert_eq!(t_dist, min_dist);
-                    closest_idx = Some(tsi);
+            // Go over the neighbouring centroids in distance order
+            for (tsi, c_to_c_dist) in clusters.neighbours[cci].iter() {
+                if *c_to_c_dist > cluster_cutoff {
+                    early_stop_count += 1;
+                    break;
                 }
-                early_stop_count += 1;
-                break;
+
+                let t_centroid = &clusters.centroids[*tsi];
+                let t_dist = t_centroid.dist(&x);
+
+                if t_dist < min_dist {
+                    min_dist = t_dist;
+                    closest_idx = Some(*tsi);
+                }
+
+                // Check if we can early stop
+                if t_dist <= clusters.certainty_radius(*tsi) {
+                    if closest_idx != Some(*tsi) {
+                        // The only case that seems to make sense is when the distance is equal
+                        assert_eq!(t_dist, min_dist, "{:?}", &clusters.neighbours[*tsi]);
+                        closest_idx = Some(*tsi);
+                    }
+                    early_stop_count += 1;
+                    break;
+                }
             }
         }
 
@@ -199,6 +214,10 @@ impl<T> Clusters<T> {
     fn len(&self) -> usize {
         assert_eq!(self.centroids.len(), self.assignment.len());
         self.centroids.len()
+    }
+
+    fn certainty_radius(&self, cid: usize) -> f64 {
+        self.neighbours[cid].get(0).map(|x| x.1).unwrap_or(0.0) / 2.0
     }
 }
 
@@ -323,6 +342,7 @@ mod test {
         let data = [(0, 0), (1, 0)];
         let clusters = super::cluster(&mut data.into_iter(), data.len());
         // Note: the certainty radius is half the distance to the closest centroid
-        assert_eq!(clusters.certainty_radii, vec![0.5, 0.5]);
+        assert_eq!(clusters.certainty_radius(0), 0.5);
+        assert_eq!(clusters.certainty_radius(1), 0.5);
     }
 }
