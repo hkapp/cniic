@@ -5,12 +5,14 @@ pub trait Point: Sized {
 }
 
 #[derive(Debug)]
-pub struct Cluster<T> {
-    pub centroid: T,
-    pub points:   Vec<T>
+pub struct Clusters<T> {
+    centroids:  Vec<T>,
+    assignment: Vec<Vec<T>>
 }
 
-pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Vec<Cluster<T>>
+/* K-Means algorithm */
+
+pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
     where I: Iterator<Item = T>,
         T: Point
 {
@@ -29,13 +31,13 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Vec<Cluster<T>>
     return clusters;
 }
 
+type Assignment<T> = Vec<Vec<T>>;
+
 // Consider requiring ExactSizeIterator
-fn init<T, I>(points: &mut I, nclusters: usize) -> Vec<Cluster<T>>
+fn init_assignment<T, I>(points: &mut I, nclusters: usize) -> Assignment<T>
     where I: Iterator<Item = T>,
         T: Point
 {
-    // 1. Assign the points to the various clusters
-
     let mut init_assignment = Vec::with_capacity(nclusters);
     for _ in 0..nclusters {
         init_assignment.push(Vec::new());
@@ -46,40 +48,40 @@ fn init<T, I>(points: &mut I, nclusters: usize) -> Vec<Cluster<T>>
         vec.push(x);
     }
 
-    // 2. Build the clusters by running mean() a first time
-    // Note: we can avoid this if we require Clone on the type T
+    return init_assignment;
+}
 
-    let mut clusters = Vec::with_capacity(nclusters);
-    for c_elems in init_assignment.into_iter() {
-        let new_c = Cluster {
-            centroid: T::mean(&c_elems),
-            points:   c_elems,
-        };
+fn init<T, I>(points: &mut I, nclusters: usize) -> Clusters<T>
+    where I: Iterator<Item = T>,
+        T: Point
+{
+    let assignment = init_assignment(points, nclusters);
 
-        clusters.push(new_c);
-    }
+    let mut clusters = Clusters {
+        assignment,
+        centroids: Vec::with_capacity(nclusters),
+    };
+
+    compute_centroids(&mut clusters);
 
     return clusters;
 }
 
-fn compute_centroids<T: Point>(clusters: &mut Vec<Cluster<T>>) {
-    for c in clusters.iter_mut() {
-        c.centroid = T::mean(&c.points);
+fn compute_centroids<T: Point>(clusters: &mut Clusters<T>) {
+    // Note: Vec::clear() keeps the underlying allocated buffer, which is what we want
+    clusters.centroids.clear();
+    for points_in_cluster in clusters.assignment.iter() {
+        clusters.centroids.push(T::mean(&points_in_cluster));
     }
 }
 
 // Returns true if some points changed assignment, false otherwise
-fn assign_points<T: Point>(clusters: &mut Vec<Cluster<T>>) -> bool {
+fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
     // This is the dummiest method: full join
 
     // 1. Extract all the vectors of points
-    let mut old_assignment = Vec::with_capacity(clusters.len());
-    for c in clusters.iter_mut() {
-        let old_points = std::mem::replace(&mut c.points, Vec::new());
-        old_assignment.push(old_points);
-        //old_assignment.push(c.points);
-        //c.points = Vec::new();
-    }
+    let new_assignment = (0..clusters.len()).map(|_| Vec::new()).collect();
+    let old_assignment = std::mem::replace(&mut clusters.assignment, new_assignment);
 
     // 2. Move the points accordingly
     let mut some_change = false;
@@ -91,14 +93,15 @@ fn assign_points<T: Point>(clusters: &mut Vec<Cluster<T>>) -> bool {
         // Find the closest centroid
         // Note that we can't use Iterator::min_by_key() because f64 is only PartialOrd
         // https://stackoverflow.com/questions/69665188/min-max-of-vecf64-trait-ord-is-not-implemented-for-xy
-        let (j, _, c_assign) = clusters.iter_mut()
-                                .enumerate()
-                                .map(|(i, c)| (i, c.centroid.dist(&x), c))
-                                .min_by(|(i, d1, _), (j, d2, _)|
-                                    d1.partial_cmp(d2).unwrap_or_else(|| i.cmp(j)))
-                                .unwrap();
+        let (j, _) = clusters.centroids
+                        .iter_mut()
+                        .enumerate()
+                        .map(|(i, c)| (i, c.dist(&x)))
+                        .min_by(|(i, d1), (j, d2)|
+                            d1.partial_cmp(d2).unwrap_or_else(|| i.cmp(j)))
+                        .unwrap();
 
-        c_assign.points.push(x);
+        clusters.assignment[j].push(x);
 
         if i != j {
             some_change = true;
@@ -106,6 +109,24 @@ fn assign_points<T: Point>(clusters: &mut Vec<Cluster<T>>) -> bool {
     }
 
     return some_change;
+}
+
+/* Public API for Clusters */
+
+impl<T> Clusters<T> {
+    // Note: we don't implement the IntoIterator trait because we'd need
+    //       to define our own iterator type
+    pub fn into_iter(self) -> impl Iterator<Item=(T, Vec<T>)> {
+        self.centroids
+            .into_iter()
+            .zip(self.assignment
+                    .into_iter())
+    }
+
+    fn len(&self) -> usize {
+        assert_eq!(self.centroids.len(), self.assignment.len());
+        self.centroids.len()
+    }
 }
 
 /* Unit tests */
@@ -136,12 +157,12 @@ mod test {
         }
     }
 
-    fn assert_centroids<T>(clusters: &[Cluster<T>], expected_centroids: &[T])
+    fn assert_centroids<T>(clusters: &Clusters<T>, expected_centroids: &[T])
         where T: Clone + Eq + std::hash::Hash + std::fmt::Debug
     {
-        assert_eq!(clusters.len(), expected_centroids.len());
+        assert_eq!(clusters.centroids.len(), expected_centroids.len());
 
-        let centroids = HashSet::<_>::from_iter(clusters.iter().map(|c| c.centroid.clone()));
+        let centroids = HashSet::<_>::from_iter(clusters.centroids.iter().clone());
         println!("Set of centroids: {:?}", centroids);
         for ex in expected_centroids {
             assert!(centroids.contains(ex), "Not present: {:?}", &ex);
@@ -154,8 +175,8 @@ mod test {
         let clusters = super::cluster(&mut data.into_iter(), data.len());
         assert_centroids(&clusters, &data[..]);
 
-        for c in clusters {
-            assert_eq!(c.points, vec![c.centroid]);
+        for i in 0..data.len() {
+            assert_eq!(clusters.assignment[i], vec![clusters.centroids[i]]);
         }
     }
 
@@ -180,7 +201,7 @@ mod test {
         println!("{:?}", &data);
         let clusters = super::cluster(&mut data.into_iter(), 1);
         assert_centroids(&clusters, &[(0, 0)][..]);
-        assert_eq!(clusters[0].points.len(), ndata);
+        assert_eq!(clusters.assignment[0].len(), ndata);
     }
 
     #[test]

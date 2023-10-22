@@ -84,7 +84,7 @@ impl bench::Bench for Hufman {
 
 /* bench: Reduce colors via k-means */
 
-type RedColKM = kmeans::Cluster<Rgb<u8>>;
+type RedColKM = kmeans::Clusters<Rgb<u8>>;
 impl bench::Bench for RedColKM {
     fn encode<W: io::Write>(img: &bench::Img, writer: &mut W) -> io::Result<()> {
         let pixels_iter = || img.pixels().map(|(_x, _y, px)| px.to_rgb());
@@ -96,23 +96,23 @@ impl bench::Bench for RedColKM {
         let nclusters = w + h;
         let clusters = kmeans::cluster(&mut distinct_colors.into_iter(), 64/*nclusters as usize*/);
 
-        println!("Resulting clusters:");
-        for i in 0..clusters.len() {
-            print!("{:<3?}  ", clusters[i].centroid.0);
-            if i % 10 == 9 {
-                println!("");
-            }
-        }
+        //println!("Resulting clusters:");
+        //for i in 0..clusters.len() {
+            //print!("{:<3?}  ", clusters[i].centroid.0);
+            //if i % 10 == 9 {
+                //println!("");
+            //}
+        //}
 
         // Convert the clusters into a direct lookup map
         let reduced_colors =
             HashMap::<_, _>::from_iter(
                 clusters.into_iter()
-                    .flat_map(|c| {
+                    .flat_map(|(centroid, points_in_cluster)| {
                         // Note: using Rc for the new color is a fake good idea:
                         //       the reference would take more space than the repeated value
-                        c.points.into_iter()
-                            .map(move |old_color| (old_color, c.centroid.clone()))
+                        points_in_cluster.into_iter()
+                            .map(move |old_color| (old_color, centroid.clone()))
                     }));
 
         // Generate a color-reduced image
