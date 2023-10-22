@@ -94,7 +94,15 @@ impl bench::Bench for RedColKM {
 
         let (w, h) = img.dimensions();
         let nclusters = w + h;
-        let clusters = kmeans::cluster(&mut distinct_colors.into_iter(), nclusters as usize);
+        let clusters = kmeans::cluster(&mut distinct_colors.into_iter(), 64/*nclusters as usize*/);
+
+        println!("Resulting clusters:");
+        for i in 0..clusters.len() {
+            print!("{:<3?}  ", clusters[i].centroid.0);
+            if i % 10 == 9 {
+                println!("");
+            }
+        }
 
         // Convert the clusters into a direct lookup map
         let reduced_colors =
@@ -132,12 +140,12 @@ impl bench::Bench for RedColKM {
 impl kmeans::Point for Rgb<u8> {
 
     fn dist(&self, other: &Self) -> f64 {
-        let tot: f64 = self.0[..]
-                        .iter()
-                        .zip(other.0[..].iter())
-                        .map(|(x, y)| (*x as f64 - *y as f64).abs())
-                        .sum();
-        return tot / 3.0;
+        self.0[..]
+            .iter()
+            .zip(other.0[..].iter())
+            .map(|(x, y)| (*x as f64 - *y as f64).powi(2))
+            .sum::<f64>()
+            .sqrt()
     }
 
     fn mean(points: &[Self]) -> Self {
@@ -148,11 +156,56 @@ impl kmeans::Point for Rgb<u8> {
             x
         }
 
+        if points.len() == 0 {
+            return Rgb(Default::default());
+        }
+
         let sum_vector = points.iter()
                             .fold([0, 0, 0], vector_add);
 
         Rgb (
             sum_vector.map(|x| (x / points.len() as u64) as u8)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::kmeans::Point;
+    use super::*;
+
+    #[test]
+    fn rgb_mean() {
+        let p1 = Rgb([0, 0, 0]);
+        let p2 = Rgb([2, 2, 2]);
+        let expected = Rgb([1, 1, 1]);
+        assert_eq!(Point::mean(&[p1, p2][..]), expected);
+    }
+
+    #[test]
+    fn rgb_dist0() {
+        let p = Rgb([0, 10, 20]);
+        assert_eq!(p.dist(&p), 0.0);
+    }
+
+    #[test]
+    fn rgb_dist1() {
+        let p1 = Rgb([0, 0, 0]);
+        let p2 = Rgb([1, 0, 0]);
+        assert_eq!(p1.dist(&p2), 1.0);
+    }
+
+    #[test]
+    fn rgb_dist2() {
+        let p1 = Rgb([0, 0, 0]);
+        let p2 = Rgb([1, 1, 0]);
+        assert_eq!(p1.dist(&p2), 2.0_f64.sqrt());
+    }
+
+    #[test]
+    fn rgb_dist3() {
+        let p1 = Rgb([0, 0, 0]);
+        let p2 = Rgb([1, 1, 1]);
+        assert_eq!(p1.dist(&p2), 3.0_f64.sqrt());
     }
 }
