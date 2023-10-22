@@ -94,7 +94,7 @@ impl bench::Bench for RedColKM {
 
         let (w, h) = img.dimensions();
         let nclusters = w + h;
-        let clusters = kmeans::cluster(&mut distinct_colors.into_iter(), 64/*nclusters as usize*/);
+        let clusters = kmeans::cluster(&mut distinct_colors.into_iter(), 16/*nclusters as usize*/);
 
         //println!("Resulting clusters:");
         //for i in 0..clusters.len() {

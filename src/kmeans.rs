@@ -1,13 +1,15 @@
 pub trait Point: Sized {
     fn dist(&self, other: &Self) -> f64;
 
+    // TODO have this return Option, s.t. it can return None when the input is empty
     fn mean(points: &[Self]) -> Self;
 }
 
 #[derive(Debug)]
 pub struct Clusters<T> {
-    centroids:  Vec<T>,
-    assignment: Vec<Vec<T>>
+    centroids:       Vec<T>,
+    assignment:      Vec<Vec<T>>,
+    certainty_radii: Vec<f64>,
 }
 
 /* K-Means algorithm */
@@ -23,7 +25,8 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
     while changed_assignment {
         changed_assignment = assign_points(&mut clusters);
         // WARNING: always compute the centroids: the caller can use them
-        compute_centroids(&mut clusters);
+        update_centroids(&mut clusters);
+        update_certainty_radii(&mut clusters);
         i += 1;
     }
     println!("#iterations: {}", i);
@@ -56,24 +59,64 @@ fn init<T, I>(points: &mut I, nclusters: usize) -> Clusters<T>
         T: Point
 {
     let assignment = init_assignment(points, nclusters);
+    let centroids = init_centroids(&assignment);
+    let certainty_radii = init_certainty_radii(&centroids);
 
-    let mut clusters = Clusters {
+    Clusters {
         assignment,
-        centroids: Vec::with_capacity(nclusters),
-    };
-
-    compute_centroids(&mut clusters);
-
-    return clusters;
-}
-
-fn compute_centroids<T: Point>(clusters: &mut Clusters<T>) {
-    // Note: Vec::clear() keeps the underlying allocated buffer, which is what we want
-    clusters.centroids.clear();
-    for points_in_cluster in clusters.assignment.iter() {
-        clusters.centroids.push(T::mean(&points_in_cluster));
+        centroids,
+        certainty_radii
     }
 }
+
+/* centroids */
+
+fn init_centroids<T: Point>(assignment: &Assignment<T>) -> Vec<T> {
+    let nclusters = assignment.len();
+    let mut centroids = Vec::with_capacity(nclusters);
+    compute_centroids(&assignment, &mut centroids);
+    return centroids;
+}
+
+fn compute_centroids<T: Point>(assignment: &Assignment<T>, centroids: &mut Vec<T>) {
+    for points_in_cluster in assignment.iter() {
+        centroids.push(T::mean(&points_in_cluster));
+    }
+}
+
+fn update_centroids<T: Point>(clusters: &mut Clusters<T>) {
+    // Note: Vec::clear() keeps the underlying allocated buffer, which is what we want
+    clusters.centroids.clear();
+    compute_centroids(&clusters.assignment, &mut clusters.centroids);
+}
+
+/* certainty radii */
+
+fn init_certainty_radii<T: Point>(centroids: &[T]) -> Vec<f64> {
+    let nclusters = centroids.len();
+    let mut radii = Vec::with_capacity(nclusters);
+    compute_certainty_radii(&centroids, &mut radii);
+    return radii;
+}
+
+fn compute_certainty_radii<T: Point>(centroids: &[T], radii: &mut Vec<f64>) {
+    for c in centroids.iter() {
+        let closest_dist = centroids.iter()
+                            .map(|other| c.dist(other))
+                            .min_by(|a, b| a.partial_cmp(b).unwrap())
+                            .unwrap();
+        let certainty_radius = closest_dist / 2.0;
+        radii.push(certainty_radius);
+    }
+}
+
+fn update_certainty_radii<T: Point>(clusters: &mut Clusters<T>) {
+    // Note: Vec::clear() keeps the underlying allocated buffer, which is what we want
+    clusters.certainty_radii.clear();
+    compute_certainty_radii(&clusters.centroids, &mut clusters.certainty_radii);
+}
+
+/* point assignment */
 
 // Returns true if some points changed assignment, false otherwise
 fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
@@ -85,7 +128,10 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
 
     // 2. Move the points accordingly
     let mut some_change = false;
-    for (i, x) in old_assignment.into_iter()
+    let mut early_stop_count = 0;
+    let mut moved_count = 0;
+    let mut stayed_count = 0;
+    for (cci, x) in old_assignment.into_iter()
                             .enumerate()
                             .flat_map(|(i, v)| v.into_iter()
                                                 .map(move |x| (i, x)))
@@ -93,20 +139,41 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
         // Find the closest centroid
         // Note that we can't use Iterator::min_by_key() because f64 is only PartialOrd
         // https://stackoverflow.com/questions/69665188/min-max-of-vecf64-trait-ord-is-not-implemented-for-xy
-        let (j, _) = clusters.centroids
-                        .iter_mut()
-                        .enumerate()
-                        .map(|(i, c)| (i, c.dist(&x)))
-                        .min_by(|(i, d1), (j, d2)|
-                            d1.partial_cmp(d2).unwrap_or_else(|| i.cmp(j)))
-                        .unwrap();
+        let mut min_dist = f64::INFINITY;
+        let mut closest_idx = None;
+        for m in 0..clusters.len() {
+            // start from the current cluster for this point
+            let tsi = (m + cci) % clusters.len();
+            let t_centroid = &clusters.centroids[tsi];
+            let t_dist = t_centroid.dist(&x);
 
+            if t_dist < min_dist {
+                min_dist = t_dist;
+                closest_idx = Some(tsi);
+            }
+
+            // Check if we can early stop
+            if t_dist <= clusters.certainty_radii[tsi] {
+                assert_eq!(closest_idx, Some(tsi));
+                early_stop_count += 1;
+                break;
+            }
+        }
+
+        let j = closest_idx.unwrap();
         clusters.assignment[j].push(x);
 
-        if i != j {
+        if cci != j {
             some_change = true;
+            moved_count += 1;
+        }
+        else {
+            stayed_count += 1;
         }
     }
+
+    println!("Moved: {}, Stayed: {}", moved_count, stayed_count);
+    println!("Stopped early: {}", early_stop_count);
 
     return some_change;
 }
