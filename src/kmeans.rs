@@ -100,11 +100,13 @@ fn init_certainty_radii<T: Point>(centroids: &[T]) -> Vec<f64> {
 }
 
 fn compute_certainty_radii<T: Point>(centroids: &[T], radii: &mut Vec<f64>) {
-    for c in centroids.iter() {
+    for (i, c) in centroids.iter().enumerate() {
         let closest_dist = centroids.iter()
-                            .map(|other| c.dist(other))
+                            .enumerate()
+                            .filter(|(other_idx, _)| *other_idx != i)  // we really want it to be different
+                            .map(|(_, other)| c.dist(other))
                             .min_by(|a, b| a.partial_cmp(b).unwrap())
-                            .unwrap();
+                            .unwrap_or(0.0);
         let certainty_radius = closest_dist / 2.0;
         radii.push(certainty_radius);
     }
@@ -154,7 +156,11 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
 
             // Check if we can early stop
             if t_dist <= clusters.certainty_radii[tsi] {
-                assert_eq!(closest_idx, Some(tsi));
+                if closest_idx != Some(tsi) {
+                    // The only case that seems to make sense is when the distance is equal
+                    assert_eq!(t_dist, min_dist);
+                    closest_idx = Some(tsi);
+                }
                 early_stop_count += 1;
                 break;
             }
@@ -290,6 +296,11 @@ mod test {
 
     #[test]
     fn dist1() {
+        assert_eq!((0, 0).dist(&(0, 1)), 1.0);
+    }
+
+    #[test]
+    fn dist2() {
         let sq_center = (-100, 0);
         let correct_centroid = (-11, 0);
         let wrong_centroid = (11, 0);
@@ -305,5 +316,13 @@ mod test {
     fn mean1() {
         let sq_center = (-100, 0);
         assert_eq!(Point::mean(&square_centered_at(sq_center)), sq_center);
+    }
+
+    #[test]
+    fn radii() {
+        let data = [(0, 0), (1, 0)];
+        let clusters = super::cluster(&mut data.into_iter(), data.len());
+        // Note: the certainty radius is half the distance to the closest centroid
+        assert_eq!(clusters.certainty_radii, vec![0.5, 0.5]);
     }
 }
