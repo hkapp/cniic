@@ -10,12 +10,15 @@ use ser::Serialize;
 
 use image::{GenericImageView, Pixel};
 use std::io;
+use std::collections::{HashSet, HashMap};
 
 fn main() {
     // Bash performs '*' expansion
     let file_paths = std::env::args().skip(1);
-    bench::measure_all::<_, _, Hufman>(file_paths).unwrap();
+    bench::measure_all::<_, _, RedColKM>(file_paths).unwrap();
 }
+
+/* bench: Hufman */
 
 use image::Rgb;
 type Hufman = (huf::Enc<Rgb<u8>>, huf::Dec<Rgb<u8>>);
@@ -34,16 +37,8 @@ impl bench::Bench for Hufman {
 
         // Now write the data
         let mut bw = bit::IoBitWriter::new(writer, huf::BIT_ORDER);
-        let mut px_counter = 0;
         for px in pixels_iter() {
-            if px_counter == 296 {
-                println!("Px input: {:?}", &px);
-            }
-            else {
-                //panic!("That should be enough");
-            }
             enc.encode(&px, &mut bw);
-            px_counter += 1;
         }
         bw.pad_and_flush()?;
         bw.into_inner().flush()?;
@@ -53,8 +48,6 @@ impl bench::Bench for Hufman {
 
     fn decode<I: Iterator<Item = u8>>(reader: &mut I) -> Option<bench::Img> {
         use ser::Deserialize;
-
-        println!("Start decoding...");
 
         // Start by reading the decoder
         let dec: huf::Dec<image::Rgb<u8>> = Deserialize::deserialize(reader)?;
@@ -86,5 +79,80 @@ impl bench::Bench for Hufman {
 
     fn name() -> String {
         String::from("Hufman")
+    }
+}
+
+/* bench: Reduce colors via k-means */
+
+type RedColKM = kmeans::Cluster<Rgb<u8>>;
+impl bench::Bench for RedColKM {
+    fn encode<W: io::Write>(img: &bench::Img, writer: &mut W) -> io::Result<()> {
+        let pixels_iter = || img.pixels().map(|(_x, _y, px)| px.to_rgb());
+
+        // For now: only cluster the unique color. Don't take their frequency into account
+        let distinct_colors = HashSet::<_>::from_iter(pixels_iter());
+
+        let (w, h) = img.dimensions();
+        let nclusters = w + h;
+        let clusters = kmeans::cluster(&mut distinct_colors.into_iter(), nclusters as usize);
+
+        // Convert the clusters into a direct lookup map
+        let reduced_colors =
+            HashMap::<_, _>::from_iter(
+                clusters.into_iter()
+                    .flat_map(|c| {
+                        // Note: using Rc for the new color is a fake good idea:
+                        //       the reference would take more space than the repeated value
+                        c.points.into_iter()
+                            .map(move |old_color| (old_color, c.centroid.clone()))
+                    }));
+
+        // Generate a color-reduced image
+        let reduced_img = image::ImageBuffer::from_fn(w, h, |x, y| {
+                                let original_color = &img.get_pixel(x, y).to_rgb();
+                                let new_color = reduced_colors.get(&original_color).unwrap();
+                                new_color.clone()
+                            });
+        // Convert from ImageBuffer to DynamicImage
+        let reduced_img = reduced_img.into();
+
+        // Hufman-encode the color-reduced image
+        Hufman::encode(&reduced_img, writer)
+    }
+
+    fn decode<I: Iterator<Item = u8>>(reader: &mut I) -> Option<bench::Img> {
+        Hufman::decode(reader)
+    }
+
+    fn name() -> String {
+        String::from("red-colors-clusters_w+h")
+    }
+}
+
+impl kmeans::Point for Rgb<u8> {
+
+    fn dist(&self, other: &Self) -> f64 {
+        let tot: f64 = self.0[..]
+                        .iter()
+                        .zip(other.0[..].iter())
+                        .map(|(x, y)| (*x as f64 - *y as f64).abs())
+                        .sum();
+        return tot / 3.0;
+    }
+
+    fn mean(points: &[Self]) -> Self {
+        fn vector_add(mut x: [u64; 3], y: &Rgb<u8>) -> [u64; 3] {
+            for i in 0..3 {
+                x[i] += y.0[i] as u64;
+            }
+            x
+        }
+
+        let sum_vector = points.iter()
+                            .fold([0, 0, 0], vector_add);
+
+        Rgb (
+            sum_vector.map(|x| (x / points.len() as u64) as u8)
+        )
     }
 }
