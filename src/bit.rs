@@ -21,6 +21,7 @@ impl From<&Bit> for u8 {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BitOrder {
     /* Most Significant Bit first
