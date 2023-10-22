@@ -1,7 +1,7 @@
 use std::fs;
 use std::io;
 use std::fmt::Debug;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use image::GenericImageView;
 use bytesize::ByteSize;
 
@@ -49,6 +49,13 @@ pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
                         eprintln!("Follow {} differences", px_pairs.count());
                          * DEBUG end
                          */
+                        // Write the incorrect image to file
+                        let mut path = PathBuf::from("output");
+                        path.push(p.as_ref().file_name().unwrap());
+                        path.set_extension("png");
+                        test.save(&path)
+                            .map_err(|e| format!("{:?}", e))?;
+                        eprintln!("Saved to {}", path.display());
                         return Err(String::from("Decoded image doesn't match"))
                     }
                 }
