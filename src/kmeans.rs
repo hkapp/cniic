@@ -84,7 +84,7 @@ fn assign_points<T: Point>(clusters: &mut Vec<Cluster<T>>) -> bool {
                                                 .map(move |x| (i, x)))
     {
         // Find the closest centroid
-        // Note that we can't use Iterator::min_by() because f64 is only PartialOrd
+        // Note that we can't use Iterator::min_by_key() because f64 is only PartialOrd
         // https://stackoverflow.com/questions/69665188/min-max-of-vecf64-trait-ord-is-not-implemented-for-xy
         let (j, _, c_assign) = clusters.iter_mut()
                                 .enumerate()
