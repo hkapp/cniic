@@ -108,7 +108,8 @@ fn compute_neighbours<T: Point>(centroids: &[T], neighbours: &mut Neighbours) {
                                             .filter(|(other_idx, _)| *other_idx != i)  // we really want it to be different
                                             .map(|(other_idx, other)| (other_idx, c.dist(other)))
                                             .collect();
-        neighbour_dists.sort_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
+        // We don't care about the stability of the ordering, we're interested in speed
+        neighbour_dists.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
         neighbours.push(neighbour_dists);
     }
 }
