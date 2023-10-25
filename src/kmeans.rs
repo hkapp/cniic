@@ -134,7 +134,6 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
     let mut some_change = false;
     let mut obvious_stay_count = 0;
     let mut neighbour_cutoff_count = 0;
-    let mut cerainty_radius_count = 0;
     let mut moved_count = 0;
     let mut stayed_count = 0;
     for (cci, x) in old_assignment.into_iter()
@@ -171,6 +170,8 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
                     closest_idx = Some(*tsi);
                 }
 
+                // This codepath almost never triggers but actually has a quite high impact on performance
+                /*
                 // Check if we can early stop
                 if t_dist <= clusters.certainty_radius(*tsi) {
                     if closest_idx != Some(*tsi) {
@@ -180,7 +181,7 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
                     }
                     cerainty_radius_count += 1;
                     break;
-                }
+                }*/
             }
         }
 
@@ -197,11 +198,10 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
     }
 
     println!("Moved: {}, Stayed: {}", moved_count, stayed_count);
-    println!("Stopped early: {}", obvious_stay_count + neighbour_cutoff_count + cerainty_radius_count);
+    println!("Stopped early: {}", obvious_stay_count + neighbour_cutoff_count);
     println!("Because of");
     println!("..certainty radius of its previous centroid: {}", obvious_stay_count);
     println!("..neighbour cutoff: {}", neighbour_cutoff_count);
-    println!("..certainty radius of another centroid: {}", cerainty_radius_count);
 
     return some_change;
 }
