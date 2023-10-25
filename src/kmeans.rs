@@ -132,7 +132,9 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
 
     // 2. Move the points accordingly
     let mut some_change = false;
-    let mut early_stop_count = 0;
+    let mut obvious_stay_count = 0;
+    let mut neighbour_cutoff_count = 0;
+    let mut cerainty_radius_count = 0;
     let mut moved_count = 0;
     let mut stayed_count = 0;
     for (cci, x) in old_assignment.into_iter()
@@ -148,7 +150,7 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
         // Check if we can early stop
         // TODO remove this 'if', it should be duplicate of the c_to_c_dist test below
         if min_dist <= clusters.certainty_radius(cci) {
-            early_stop_count += 1;
+            obvious_stay_count += 1;
         }
         else {
             // TODO: explain this
@@ -157,7 +159,7 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
             // Go over the neighbouring centroids in distance order
             for (tsi, c_to_c_dist) in clusters.neighbours[cci].iter() {
                 if *c_to_c_dist > cluster_cutoff {
-                    early_stop_count += 1;
+                    neighbour_cutoff_count += 1;
                     break;
                 }
 
@@ -176,7 +178,7 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
                         assert_eq!(t_dist, min_dist, "{:?}", &clusters.neighbours[*tsi]);
                         closest_idx = Some(*tsi);
                     }
-                    early_stop_count += 1;
+                    cerainty_radius_count += 1;
                     break;
                 }
             }
@@ -195,7 +197,11 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
     }
 
     println!("Moved: {}, Stayed: {}", moved_count, stayed_count);
-    println!("Stopped early: {}", early_stop_count);
+    println!("Stopped early: {}", obvious_stay_count + neighbour_cutoff_count + cerainty_radius_count);
+    println!("Because of");
+    println!("..certainty radius of its previous centroid: {}", obvious_stay_count);
+    println!("..neighbour cutoff: {}", neighbour_cutoff_count);
+    println!("..certainty radius of another centroid: {}", cerainty_radius_count);
 
     return some_change;
 }
