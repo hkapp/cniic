@@ -114,6 +114,7 @@ fn compute_neighbours<T: Point>(centroids: &[T], neighbours: &mut Neighbours) {
     for (i, c) in centroids.iter().enumerate() {
         for neigh in neighbours[i].iter_mut() {
             neigh.1 = c.dist(&centroids[neigh.0]);
+            assert!(neigh.1.is_finite());
         }
 
         // Optimization: use unstable sorting
@@ -122,7 +123,7 @@ fn compute_neighbours<T: Point>(centroids: &[T], neighbours: &mut Neighbours) {
         //let already_sorted=false;
         if !already_sorted {
             sort_count += 1;
-            neighbours[i].sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
+            neighbours[i].sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).ok_or_else(|| format!("{} <> {}", a, b)).unwrap());
         }
     }
     println!("Sorted {} times", sort_count);
