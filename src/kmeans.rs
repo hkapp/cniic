@@ -96,27 +96,40 @@ type Neighbours = Vec<Vec<(usize, f64)>>;
 
 fn init_neighbours<T: Point>(centroids: &[T]) -> Neighbours {
     let nclusters = centroids.len();
-    let mut neighbours = Vec::with_capacity(nclusters);
+    let mut neighbours = (0..nclusters)  // for each clusters
+                            .map(|i|
+                                (0..nclusters)  // generate neighbours
+                                .filter(|j| *j != i)  // can't be self
+                                .map(|j| (j, 0.0))
+                                .collect())
+                            .collect();
     compute_neighbours(&centroids, &mut neighbours);
     return neighbours;
 }
 
+// Optimization: keep the array in the previous order
+// There are good chances that the array is already sorted in this case
 fn compute_neighbours<T: Point>(centroids: &[T], neighbours: &mut Neighbours) {
+    let mut sort_count = 0;
     for (i, c) in centroids.iter().enumerate() {
-        let mut neighbour_dists: Vec<_> = centroids.iter()
-                                            .enumerate()
-                                            .filter(|(other_idx, _)| *other_idx != i)  // we really want it to be different
-                                            .map(|(other_idx, other)| (other_idx, c.dist(other)))
-                                            .collect();
+        for neigh in neighbours[i].iter_mut() {
+            neigh.1 = c.dist(&centroids[neigh.0]);
+        }
+
+        // Optimization: use unstable sorting
         // We don't care about the stability of the ordering, we're interested in speed
-        neighbour_dists.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
-        neighbours.push(neighbour_dists);
+        let already_sorted = neighbours[i].windows(2).find(|xs| xs[0].1 > xs[1].1).is_none();
+        //let already_sorted=false;
+        if !already_sorted {
+            sort_count += 1;
+            neighbours[i].sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
+        }
     }
+    println!("Sorted {} times", sort_count);
 }
 
 fn update_neighbours<T: Point>(clusters: &mut Clusters<T>) {
-    // Note: Vec::clear() keeps the underlying allocated buffer, which is what we want
-    clusters.neighbours.clear();
+    // Optimization: don't clear the buffer and keep it in the same order
     compute_neighbours(&clusters.centroids, &mut clusters.neighbours);
 }
 
