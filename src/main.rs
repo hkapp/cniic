@@ -149,7 +149,8 @@ impl kmeans::Point for Rgb<u8> {
         let f = |i: usize| {
             let x = self[i];
             let y = other[i];
-            (x as i32 - y as i32).pow(2) as f64
+            let diff = x as i32 - y as i32;
+            (diff * diff) as f64
         };
         (f(0) + f(1) + f(2)).sqrt()
     }
