@@ -1,4 +1,6 @@
 mod seq;
+#[allow(dead_code)]
+mod parl;
 
 pub trait Point: Sized {
     fn dist(&self, other: &Self) -> f64;
