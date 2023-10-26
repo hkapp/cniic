@@ -117,12 +117,19 @@ fn compute_neighbours<T: Point>(centroids: &[T], neighbours: &mut Neighbours) {
             assert!(neigh.1.is_finite());
         }
 
-        // Optimization: use unstable sorting
-        // We don't care about the stability of the ordering, we're interested in speed
-        let already_sorted = neighbours[i].windows(2).find(|xs| xs[0].1 > xs[1].1).is_none();
+        let already_sorted = neighbours[i]
+                                .windows(2)
+                                // Optimization: consider it "good enough" if the first sqrt(nclusters) are sorted
+                                // This leads to imprecision. Though when we get to the point where the first sqrt(nclusters)
+                                // remain sorted, we can assume that the points don't go so far in the list of neighbours anymore
+                                .take((centroids.len() as f64).sqrt() as usize)
+                                .find(|xs| xs[0].1 > xs[1].1)
+                                .is_none();
         //let already_sorted=false;
         if !already_sorted {
             sort_count += 1;
+            // Optimization: use unstable sorting
+            // We don't care about the stability of the ordering, we're interested in speed
             neighbours[i].sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).ok_or_else(|| format!("{} <> {}", a, b)).unwrap());
         }
     }
