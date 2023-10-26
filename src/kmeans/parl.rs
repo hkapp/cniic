@@ -2,6 +2,7 @@ use super::Point;
 use std::thread;
 use std::sync::Barrier;
 use std::sync::atomic::{self, AtomicBool};
+use std::sync::mpsc::{self, Sender, Receiver};
 
 /*********************/
 /* K-Means algorithm */
@@ -23,9 +24,23 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
 
     let clusters = init(points, nclusters);
 
-    let workers = (0..nthreads)
-                    .map(|_| thread::spawn(thread_start))
-                    .collect();
+    let shared_state = SharedState::new(nthreads);
+
+    let (senders, mut receivers): (Vec<_>, Vec<_>) = (0..nthreads)
+                                                        .map(|_| mpsc::channel())
+                                                        .unzip();
+    // We're going to pop() the receivers, which takes from the bottom
+    // So reverse the vec now
+    receivers.reverse();
+
+    let mut workers = Vec::new();
+    for _ in 0..nthreads {
+        let w = WorkerThread::new(receivers.pop().unwrap(), senders.clone());
+        workers.push(
+            thread::spawn(||
+                w.start(&shared_state)));
+    }
+
     workers.into_iter()
         .for_each(|w| w.join().unwrap());
 
@@ -36,27 +51,61 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
 /* Worker thread */
 /*****************/
 
+type ThreadId = usize;
+
 const ATOMIC_ORDERING: atomic::Ordering = atomic::Ordering::Relaxed;
 
-struct WorkerThread {
+type Message<T> = RemoteAssignment<T>;
 
+struct WorkerThread<T> {
+    inward:   Receiver<Message<T>>,
+    outwards: Vec<Sender<Message<T>>>,
 }
 
-fn thread_start(this_thread: WorkerThread, shared_state: SharedState) -> WorkerThread {
-    this_thread.init_centroids();
-    this_thread.init_centroid_neighbours();
-
-    let mut i_have_changes = true;
-    while shared_state.consensus_continue(i_have_changes) {
-        this_thread.update_centroid_neighbours();
-        let local_changes = this_thread.assign_points_to_clusters();
-        // This effectively acts like a sync barrier
-        let remote_changes = this_thread.receive_external_assignments();
-        i_have_changes = local_changes || remote_changes;
-        this_thread.compute_centroids();
+impl<T> WorkerThread<T> {
+    fn new(inward: Receiver<Message<T>>, outwards: Vec<Sender<Message<T>>>) -> Self {
+        WorkerThread {
+            inward,
+            outwards
+        }
     }
 
-    return this_thread;
+    fn start(self, shared_state: &SharedState) -> Self {
+        self.init_centroids();
+        self.init_centroid_neighbours();
+
+        let mut i_have_changes = true;
+        while shared_state.consensus_continue(i_have_changes) {
+            self.update_centroid_neighbours();
+            let local_changes = self.assign_points_to_clusters();
+            self.send_remote_assignments();
+            // This effectively acts like a sync barrier
+            let remote_changes = self.receive_remote_assignments();
+            i_have_changes = local_changes || remote_changes;
+            self.compute_centroids();
+        }
+
+        return self;
+    }
+
+    fn assign_points_to_clusters(&mut self) -> bool {
+        assign_points_seq(self.my_assignment)
+    }
+
+    fn send_remote_assignments(&mut self) {
+        self.my_assignment
+            .iter_mut()
+            .enumerate()
+            .filter(|c| !self.is_my_cluster(c))
+            .for_each(|c| self.send_to_remote(c));  // TODO need to std::mem::take()
+        self.notify_others_done_with_assign();
+    }
+
+    fn send_to_remote(&self, message: Message<T>, destination: ThreadId) {
+        self.outwards[destination]
+            .send(message)
+            .unwrap()  // we can't really continue if the message sending failed
+    }
 }
 
 /***************/
@@ -69,6 +118,15 @@ struct SharedState {
 }
 
 impl SharedState {
+    fn new(nthreads: usize) -> Self {
+        SharedState {
+            // WARNING: this starting value is very important
+            // See consensus_continue()
+            anyone_has_changes: AtomicBool::new(false),
+            barrier:            Barrier::new(nthreads),
+        }
+    }
+
     // If any thread has changes, this returns true
     fn consensus_continue(&self, i_have_changes: bool) -> bool {
         if i_have_changes {
