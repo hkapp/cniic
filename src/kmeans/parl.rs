@@ -55,11 +55,12 @@ type ThreadId = usize;
 
 const ATOMIC_ORDERING: atomic::Ordering = atomic::Ordering::Relaxed;
 
-type Message<T> = RemoteAssignment<T>;
+type Message<T> = Result<RemoteAssignment<T>, ThreadId>;
 
 struct WorkerThread<T> {
-    inward:   Receiver<Message<T>>,
-    outwards: Vec<Sender<Message<T>>>,
+    inward:        Receiver<Message<T>>,
+    outwards:      Vec<Sender<Message<T>>>,
+    my_assignment: WorkerAssignment<T>,
 }
 
 impl<T> WorkerThread<T> {
@@ -94,9 +95,7 @@ impl<T> WorkerThread<T> {
 
     fn send_remote_assignments(&mut self) {
         self.my_assignment
-            .iter_mut()
-            .enumerate()
-            .filter(|c| !self.is_my_cluster(c))
+            .extract_remote_assignments()
             .for_each(|c| self.send_to_remote(c));  // TODO need to std::mem::take()
         self.notify_others_done_with_assign();
     }
@@ -105,6 +104,61 @@ impl<T> WorkerThread<T> {
         self.outwards[destination]
             .send(message)
             .unwrap()  // we can't really continue if the message sending failed
+    }
+}
+
+/* WorkerAssignment */
+/* The subset of the total point-to-cluster assignment that this worker thread knows about.
+ * Before assigning points to clusters, these are all the points assigned to the clusters this worker is responsible for.
+ * After assigning points to clusters, these are the assignments for the points previously in a clusters this worker is responsible for.
+ *
+ * This is a partitioned assignment table.
+ * The first level is partitioned by thread.
+ * The second level is partitioned by cluster.
+ * Note that one of the first levels is for the current thread.
+ */
+struct WorkerAssignment<T> {
+    thread_assignments: Vec<RemoteAssignment<T>>,
+    current_thread:     ThreadId
+}
+
+impl<T> WorkerAssignment<T> {
+    // Extract and return the non-empty thread-level assignments for other worker threads
+    fn extract_remote_assignments<'a>(&'a mut self) -> impl Iterator<Item=(ThreadId, RemoteAssignment<T>)> + 'a {
+        let this_thread = self.current_thread;
+
+        self.thread_iter_mut()
+            .filter(move |(that_thread, _)| this_thread != *that_thread)  // keep only remote assignments
+            .filter(|(_, asg)| !asg.is_empty())  // nothing to do for empty asignments
+            .map(|(other_tid, other_asg)| (other_tid, other_asg.extract()))
+    }
+
+    fn thread_iter_mut(&mut self) -> impl Iterator<Item=(ThreadId, &mut RemoteAssignment<T>)> {
+        self.thread_assignments
+            .iter_mut()
+            .enumerate()
+    }
+}
+
+/* RemoteAssignment */
+// Subset of a WorkerAssignment corresponding to a given thread.
+struct RemoteAssignment<T> (Vec<Vec<T>>);
+
+impl<T> RemoteAssignment<T> {
+    fn new(nclusters: usize) -> Self {
+        let assignments = (0..nclusters).map(|_| Vec::new()).collect();
+        RemoteAssignment(assignments)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0
+            .iter()
+            .all(|cluster_asg| cluster_asg.is_empty())
+    }
+
+    fn extract(&mut self) -> Self {
+        let new_empty = RemoteAssignment::new(self.0.len());
+        std::mem::replace(self, new_empty)
     }
 }
 
