@@ -1,4 +1,5 @@
 use super::Point;
+use std::collections::HashSet;
 use std::thread;
 use std::sync::Barrier;
 use std::sync::atomic::{self, AtomicBool};
@@ -22,7 +23,8 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
     let avail_threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let nthreads = avail_threads.min(nclusters);
 
-    let clusters = init(points, nclusters);
+    let clusters_per_thread = distribute_clusters(nthreads, nclusters);
+    println!("Clusters per thread: {:?}", &clusters_per_thread);
 
     let shared_state = SharedState::new(nthreads);
 
@@ -34,8 +36,8 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
     receivers.reverse();
 
     let mut workers = Vec::new();
-    for _ in 0..nthreads {
-        let w = WorkerThread::new(receivers.pop().unwrap(), senders.clone());
+    for thread_id in 0..nthreads {
+        let w = WorkerThread::new(thread_id, &clusters_per_thread, receivers.pop().unwrap(), senders.clone());
         workers.push(
             thread::spawn(||
                 w.start(&shared_state)));
@@ -43,8 +45,22 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
 
     workers.into_iter()
         .for_each(|w| w.join().unwrap());
+}
 
-    return clusters;
+// Returns how many clusters for each thread, as evenly distributed as possible
+fn distribute_clusters(nthreads: usize, nclusters: usize) -> Vec<usize> {
+    let mut distribution = Vec::with_capacity(nthreads);
+    let mut rem_clusters = nclusters;
+
+    for i in 0..nthreads {
+        let rem_threads = nthreads - i;
+        let assigned = rem_clusters / rem_threads;
+        distribution.push(assigned);
+        rem_clusters -= assigned;
+    }
+
+    assert_eq!({let s: usize = distribution.iter().sum(); s}, nclusters);
+    return distribution;
 }
 
 /*****************/
@@ -55,19 +71,23 @@ type ThreadId = usize;
 
 const ATOMIC_ORDERING: atomic::Ordering = atomic::Ordering::Relaxed;
 
-type Message<T> = Result<RemoteAssignment<T>, ThreadId>;
+type Message<T> = Result<(ThreadId, RemoteAssignment<T>), ThreadId>;
 
 struct WorkerThread<T> {
+    thread_id:     ThreadId,
     inward:        Receiver<Message<T>>,
     outwards:      Vec<Sender<Message<T>>>,
     my_assignment: WorkerAssignment<T>,
 }
 
 impl<T> WorkerThread<T> {
-    fn new(inward: Receiver<Message<T>>, outwards: Vec<Sender<Message<T>>>) -> Self {
+    fn new(thread_id: ThreadId, clusters_per_thread: &[usize], inward: Receiver<Message<T>>, outwards: Vec<Sender<Message<T>>>) -> Self {
+        assert_eq!(clusters_per_thread.len(), outwards.len());
         WorkerThread {
+            thread_id,
             inward,
-            outwards
+            outwards,
+            my_assignment: WorkerAssignment::new(thread_id, clusters_per_thread),
         }
     }
 
@@ -81,7 +101,7 @@ impl<T> WorkerThread<T> {
             let local_changes = self.assign_points_to_clusters();
             self.send_remote_assignments();
             // This effectively acts like a sync barrier
-            let remote_changes = self.receive_remote_assignments();
+            let remote_changes = self.receive_remote_assignments(shared_state.nthreads);
             i_have_changes = local_changes || remote_changes;
             self.compute_centroids();
         }
@@ -94,16 +114,55 @@ impl<T> WorkerThread<T> {
     }
 
     fn send_remote_assignments(&mut self) {
-        self.my_assignment
-            .extract_remote_assignments()
-            .for_each(|c| self.send_to_remote(c));  // TODO need to std::mem::take()
+        for (dest, data) in self.my_assignment.extract_remote_assignments() {
+            let message = Ok((self.thread_id, data));
+            self.send_message(dest, message);
+        }
         self.notify_others_done_with_assign();
     }
 
-    fn send_to_remote(&self, message: Message<T>, destination: ThreadId) {
+    fn notify_others_done_with_assign(&self) {
+        for channel in self.outwards {
+            let message = Err(self.thread_id); // means EOF
+            channel.send(message).unwrap()
+        }
+    }
+
+    fn send_message(&self, destination: ThreadId, message: Message<T>) {
         self.outwards[destination]
             .send(message)
             .unwrap()  // we can't really continue if the message sending failed
+    }
+
+    // Keep reading the receiver channel until all other threads have sent EOF
+    fn receive_remote_assignments(&mut self, nthreads: usize) -> bool {
+        let mut not_received = HashSet::<_>::from_iter((0..nthreads).into_iter());
+        not_received.remove(&self.thread_id);
+
+        let mut received_any_changes = false;
+
+        while !not_received.is_empty() {
+            match self.inward.recv() {
+                Ok(Ok((sender_id, remote_assignment))) => {
+                    self.my_assignment.integrate_remote(sender_id, remote_assignment);
+                    received_any_changes = true;
+                },
+                Ok(Err(thread_eof)) => {
+                    let was_there = not_received.remove(&thread_eof);
+                    assert!(was_there, "{}", thread_eof);
+                }
+                Err(_) => {
+                    /* From https://doc.rust-lang.org/std/sync/mpsc/struct.RecvError.html:
+                     *   The recv operation can only fail if the sending half of a channel (or sync_channel) is disconnected,
+                     *   implying that no further messages will ever be received.
+                     * In our case, this should never happen. Panic.
+                     */
+                     panic!("The channel for thread {} was shut", self.thread_id);
+                }
+            }
+        }
+
+        return received_any_changes;
     }
 }
 
@@ -123,6 +182,16 @@ struct WorkerAssignment<T> {
 }
 
 impl<T> WorkerAssignment<T> {
+    fn new(this_thread: ThreadId, clusters_per_thread: &[usize]) -> Self {
+        WorkerAssignment {
+            thread_assignments: clusters_per_thread
+                                    .iter()
+                                    .map(|nclusters| RemoteAssignment::new(*nclusters))
+                                    .collect(),
+            current_thread: this_thread,
+        }
+    }
+
     // Extract and return the non-empty thread-level assignments for other worker threads
     fn extract_remote_assignments<'a>(&'a mut self) -> impl Iterator<Item=(ThreadId, RemoteAssignment<T>)> + 'a {
         let this_thread = self.current_thread;
@@ -137,6 +206,11 @@ impl<T> WorkerAssignment<T> {
         self.thread_assignments
             .iter_mut()
             .enumerate()
+    }
+
+    fn integrate_remote(&mut self, sender: ThreadId, remote_assignment: RemoteAssignment<T>) {
+        self.thread_assignments[sender]
+            .merge(remote_assignment)
     }
 }
 
@@ -160,6 +234,12 @@ impl<T> RemoteAssignment<T> {
         let new_empty = RemoteAssignment::new(self.0.len());
         std::mem::replace(self, new_empty)
     }
+
+    fn merge(&mut self, other: Self) {
+        self.0.iter_mut()
+            .zip(other.0.iter_mut())
+            .for_each(|(v, w)| v.append(w))
+    }
 }
 
 /***************/
@@ -167,6 +247,7 @@ impl<T> RemoteAssignment<T> {
 /***************/
 
 struct SharedState {
+    nthreads:           usize,
     anyone_has_changes: AtomicBool,
     barrier:            Barrier,
 }
@@ -174,6 +255,7 @@ struct SharedState {
 impl SharedState {
     fn new(nthreads: usize) -> Self {
         SharedState {
+            nthreads,
             // WARNING: this starting value is very important
             // See consensus_continue()
             anyone_has_changes: AtomicBool::new(false),
