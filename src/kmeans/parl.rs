@@ -477,7 +477,7 @@ fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, all_neighbour
 
         // Check if we can early stop
         // TODO remove this 'if', it should be duplicate of the c_to_c_dist test below
-        if min_dist <= certainty_radius(prev_cluster_id, all_neighbours) {
+        if min_dist <= certainty_radius(partial_cid, all_neighbours) {
             obvious_stay_count += 1;
         }
         else {
@@ -679,6 +679,14 @@ impl Neighbours {
     fn neighbours_of(&self, local_cluster_id: PartialCentroidId) -> &[NeighInfo] {
         &self.0[local_cluster_id]
     }
+}
+
+// Adapted from seq::Clusters::certainty_radius
+fn certainty_radius(local_cid: PartialCentroidId, all_neighbours: &Neighbours) -> f64 {
+    all_neighbours.0[local_cid]
+        .get(0)
+        .map(|first_neigh| first_neigh.neigh_dist / 2.0)
+        .unwrap_or(f64::INFINITY)  // if a node has no neighbours, it has an infinite certainty radius
 }
 
 //type Neighbours = Vec<Vec<(usize, f64)>>;
