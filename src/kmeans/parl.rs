@@ -41,22 +41,30 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
     // Build reader/writer pairs for the centroids
     // Each worker thread will get a writer
     // The SharedState will keep the readers
-    let (centroid_readers, centroid_writers) = centroids.into_iter()
-                                                .map(|thread_clusters| build_centroid_reader_writer_pair(thread_clusters))
-                                                .unzip();
+    let (centroid_readers, centroid_writers): (Vec<_>, Vec<_>) =
+            centroids.into_iter()
+                    .map(|thread_clusters| build_centroid_reader_writer_pair(thread_clusters))
+                    .unzip();
 
     let shared_state = SharedState::new(nthreads, centroid_readers);
 
-    let (senders, mut receivers): (Vec<_>, Vec<_>) = (0..nthreads)
+    let (senders, receivers): (Vec<_>, Vec<_>) = (0..nthreads)
                                                         .map(|_| mpsc::channel())
                                                         .unzip();
-    // We're going to pop() the receivers, which takes from the bottom
-    // So reverse the vec now
-    receivers.reverse();
 
     let mut workers = Vec::new();
+    let mut all_assignments = assignments.into_iter();
+    let mut centroids_iter = centroid_writers.into_iter();
+    let mut receivers_iter = receivers.into_iter();
+
     for thread_id in 0..nthreads {
-        let w = WorkerThread::new(thread_id, &clusters_per_thread, receivers.pop().unwrap(), senders.clone());
+        let local_assignment = all_assignments.next().unwrap();
+        let assigned_centroids = centroids_iter.next().unwrap();
+        let messages_send = senders.clone();
+        let messages_receive = receivers_iter.next().unwrap();
+
+        let w = WorkerThread::new(thread_id, local_assignment, &clusters_per_thread, assigned_centroids, messages_receive, messages_send);
+
         workers.push(
             thread::spawn(||
                 w.start(&shared_state)));
@@ -82,59 +90,6 @@ fn distribute_clusters(nthreads: usize, nclusters: usize) -> Vec<usize> {
     return distribution;
 }
 
-/***************/
-/* SharedState */
-/***************/
-
-struct SharedState<T> {
-    nthreads:           usize,
-    anyone_has_changes: AtomicBool,
-    barrier:            Barrier,
-    centroids:          Vec<CentroidReader<T>>,  // indexed by ThreadId
-}
-
-impl<T> SharedState<T> {
-    fn new(nthreads: usize, centroid_readers: Vec<CentroidReader<T>>) -> Self {
-        SharedState {
-            nthreads,
-            // WARNING: this starting value is very important
-            // See consensus_continue()
-            anyone_has_changes: AtomicBool::new(false),
-            barrier:            Barrier::new(nthreads),
-            centroids:          centroid_readers,
-        }
-    }
-
-    // If any thread has changes, this returns true
-    fn consensus_continue(&self, i_have_changes: bool) -> bool {
-        if i_have_changes {
-            self.anyone_has_changes.store(true, ATOMIC_ORDERING);
-        }
-
-        // Wait for every thread to get to this point
-        let barrier_result = self.barrier.wait();
-
-        let should_continue = self.anyone_has_changes.load(ATOMIC_ORDERING);
-        if should_continue && barrier_result.is_leader() {
-            // Reset the "has_any_changes" for the next round
-            // We only need one thread to do that, hence the use of "is_leader()"
-            // WARNING: technically the leader thread could starve until another thread gets back
-            // to this consensus function
-            self.anyone_has_changes.store(false, ATOMIC_ORDERING)
-        }
-
-        return should_continue;
-    }
-
-    fn get_centroid(&self, c: FullCentroidId) -> &Centroid<T> {
-        unsafe {
-            self.centroids[c.thread_id]
-                .read(c.cluster_in_thread)
-                .unwrap()
-        }
-    }
-}
-
 /*****************/
 /* Worker thread */
 /*****************/
@@ -154,13 +109,21 @@ struct WorkerThread<T> {
 }
 
 impl<T> WorkerThread<T> {
-    fn new(thread_id: ThreadId, clusters_per_thread: &[usize], inward: Receiver<Message<T>>, outwards: Vec<Sender<Message<T>>>) -> Self {
-        assert_eq!(clusters_per_thread.len(), outwards.len());
+    fn new(
+        thread_id:           ThreadId,
+        starting_assignment: RemoteAssignment<T>,
+        clusters_per_thread: &[usize],
+        init_clusters:       CentroidWriter<T>,
+        inward:              Receiver<Message<T>>,
+        outwards:            Vec<Sender<Message<T>>>)
+        -> Self
+    {
         WorkerThread {
             thread_id,
             inward,
             outwards,
-            my_assignment: WorkerAssignment::new(thread_id, clusters_per_thread),
+            my_assignment: WorkerAssignment::from(thread_id, starting_assignment, clusters_per_thread),
+            my_clusters:   init_clusters
         }
     }
 
@@ -252,6 +215,59 @@ impl<T: Point> WorkerThread<T> {
     }
 }
 
+/***************/
+/* SharedState */
+/***************/
+
+struct SharedState<T> {
+    nthreads:           usize,
+    anyone_has_changes: AtomicBool,
+    barrier:            Barrier,
+    centroids:          Vec<CentroidReader<T>>,  // indexed by ThreadId
+}
+
+impl<T> SharedState<T> {
+    fn new(nthreads: usize, centroid_readers: Vec<CentroidReader<T>>) -> Self {
+        SharedState {
+            nthreads,
+            // WARNING: this starting value is very important
+            // See consensus_continue()
+            anyone_has_changes: AtomicBool::new(false),
+            barrier:            Barrier::new(nthreads),
+            centroids:          centroid_readers,
+        }
+    }
+
+    // If any thread has changes, this returns true
+    fn consensus_continue(&self, i_have_changes: bool) -> bool {
+        if i_have_changes {
+            self.anyone_has_changes.store(true, ATOMIC_ORDERING);
+        }
+
+        // Wait for every thread to get to this point
+        let barrier_result = self.barrier.wait();
+
+        let should_continue = self.anyone_has_changes.load(ATOMIC_ORDERING);
+        if should_continue && barrier_result.is_leader() {
+            // Reset the "has_any_changes" for the next round
+            // We only need one thread to do that, hence the use of "is_leader()"
+            // WARNING: technically the leader thread could starve until another thread gets back
+            // to this consensus function
+            self.anyone_has_changes.store(false, ATOMIC_ORDERING)
+        }
+
+        return should_continue;
+    }
+
+    fn get_centroid(&self, c: FullCentroidId) -> &Centroid<T> {
+        unsafe {
+            self.centroids[c.thread_id]
+                .read(c.cluster_in_thread)
+                .unwrap()
+        }
+    }
+}
+
 /********************/
 /* Point assignment */
 /********************/
@@ -297,6 +313,7 @@ impl<T> RemoteAssignment<T> {
     }
 
     fn merge(&mut self, other: Self) {
+        assert_eq!(self.num_clusters(), other.num_clusters());
         self.0.iter_mut()
             .zip(other.0.iter_mut())
             .for_each(|(v, w)| v.append(w))
@@ -353,6 +370,13 @@ impl<T> WorkerAssignment<T> {
         }
     }
 
+    fn from(this_thread: ThreadId, local_assignment: RemoteAssignment<T>, clusters_per_thread: &[usize]) -> Self {
+        let mut wasg = Self::new(this_thread, clusters_per_thread);
+        // TODO use integrate_remote if possible
+        *wasg.get_local_mut() = local_assignment;
+        return wasg;
+    }
+
     // Extract and return the non-empty thread-level assignments for other worker threads
     fn extract_remote_assignments<'a>(&'a mut self) -> impl Iterator<Item=(ThreadId, RemoteAssignment<T>)> + 'a {
         let this_thread = self.current_thread;
@@ -376,8 +400,10 @@ impl<T> WorkerAssignment<T> {
             .enumerate()
     }
 
+    // FIXME why do we need to know who sent this data?
     fn integrate_remote(&mut self, sender: ThreadId, remote_assignment: RemoteAssignment<T>) {
-        self.thread_assignments[sender]
+        //self.thread_assignments[sender]
+        self.get_local_mut()
             .merge(remote_assignment)
     }
 
@@ -399,6 +425,10 @@ impl<T> WorkerAssignment<T> {
 
     fn get_local(&self) -> &RemoteAssignment<T> {
         &self.thread_assignments[self.current_thread]
+    }
+
+    fn get_local_mut(&mut self) -> &mut RemoteAssignment<T> {
+        &mut self.thread_assignments[self.current_thread]
     }
 }
 
