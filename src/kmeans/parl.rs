@@ -18,7 +18,7 @@ pub struct Clusters<T> {
 
 pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
     where I: Iterator<Item = T>,
-        T: Point + Send
+        T: Point + Send + Sync
 {
     // Figure out how many threads to use
     let avail_threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
@@ -150,6 +150,7 @@ struct WorkerThread<T> {
     inward:        Receiver<Message<T>>,
     outwards:      Vec<Sender<Message<T>>>,
     my_assignment: WorkerAssignment<T>,
+    my_clusters:   CentroidWriter<T>,
 }
 
 impl<T> WorkerThread<T> {
@@ -214,6 +215,11 @@ impl<T> WorkerThread<T> {
 
         return received_any_changes;
     }
+
+    fn num_clusters_assigned_to_me(&self) -> usize {
+        self.my_assignment
+            .num_local_clusters()
+    }
 }
 
 impl<T: Point> WorkerThread<T> {
@@ -234,6 +240,15 @@ impl<T: Point> WorkerThread<T> {
 
     fn assign_points_to_clusters(&mut self, shared_state: &SharedState<T>) -> bool {
         assign_points_seq(&mut self.my_assignment, shared_state)
+    }
+
+    unsafe fn compute_centroids(&mut self) {
+        // We only consider the points assigned to this thread
+        let local_asg = self.my_assignment.get_local();
+
+        for (i, points_in_cluster) in local_asg.iter_clusters() {
+            self.my_clusters.write(i, points_in_cluster);
+        }
     }
 }
 
@@ -291,19 +306,24 @@ impl<T> RemoteAssignment<T> {
         self.0[target_cluster].push(x)
     }
 
-    fn iter_clusters(&self) -> impl Iterator<Item=&Vec<T>> {
+    fn iter_clusters(&self) -> impl Iterator<Item=(PartialClusterId, &Vec<T>)> {
         self.0.iter()
+            .enumerate()
     }
 
     fn len(&self) -> usize {
         self.iter_clusters()
-            .map(|data| data.len())
+            .map(|(_, data)| data.len())
             .sum()
     }
 
     fn into_iter_clusters(self) -> impl Iterator<Item=(PartialCentroidId, Vec<T>)> {
         self.0.into_iter()
             .enumerate()
+    }
+
+    fn num_clusters(&self) -> usize {
+        self.0.len()
     }
 }
 
@@ -370,6 +390,15 @@ impl<T> WorkerAssignment<T> {
     fn assign(&mut self, cluster_id: FullCentroidId, x: T) {
         self.thread_assignments[cluster_id.thread_id]
             .assign(cluster_id.cluster_in_thread, x)
+    }
+
+    fn num_local_clusters(&self) -> usize {
+        self.get_local()
+            .num_clusters()
+    }
+
+    fn get_local(&self) -> &RemoteAssignment<T> {
+        &self.thread_assignments[self.current_thread]
     }
 }
 
@@ -548,7 +577,7 @@ fn init_centroids<T: Point>(assignment: &RemoteAssignment<T>) -> Vec<Centroid<T>
     let nclusters = assignment.len();
 
     assignment.iter_clusters()
-        .map(|cluster_data| Centroid::from(cluster_data))
+        .map(|(_, cluster_data)| Centroid::from(cluster_data))
         .collect()
 }
 
