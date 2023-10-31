@@ -91,28 +91,6 @@ impl<T> WorkerThread<T> {
         }
     }
 
-    fn start(self, shared_state: &SharedState) -> Self {
-        self.init_centroids();
-        self.init_centroid_neighbours();
-
-        let mut i_have_changes = true;
-        while shared_state.consensus_continue(i_have_changes) {
-            self.update_centroid_neighbours();
-            let local_changes = self.assign_points_to_clusters();
-            self.send_remote_assignments();
-            // This effectively acts like a sync barrier
-            let remote_changes = self.receive_remote_assignments(shared_state.nthreads);
-            i_have_changes = local_changes || remote_changes;
-            self.compute_centroids();
-        }
-
-        return self;
-    }
-
-    fn assign_points_to_clusters(&mut self) -> bool {
-        assign_points_seq(self.my_assignment)
-    }
-
     fn send_remote_assignments(&mut self) {
         for (dest, data) in self.my_assignment.extract_remote_assignments() {
             let message = Ok((self.thread_id, data));
@@ -166,6 +144,30 @@ impl<T> WorkerThread<T> {
     }
 }
 
+impl<T: Point> WorkerThread<T> {
+    fn start(self, shared_state: &SharedState) -> Self {
+        self.init_centroids();
+        self.init_centroid_neighbours();
+
+        let mut i_have_changes = true;
+        while shared_state.consensus_continue(i_have_changes) {
+            self.update_centroid_neighbours();
+            let local_changes = self.assign_points_to_clusters(shared_state);
+            self.send_remote_assignments();
+            // This effectively acts like a sync barrier
+            let remote_changes = self.receive_remote_assignments(shared_state.nthreads);
+            i_have_changes = local_changes || remote_changes;
+            self.compute_centroids();
+        }
+
+        return self;
+    }
+
+    fn assign_points_to_clusters(&mut self, shared_state: &SharedState) -> bool {
+        assign_points_seq(&mut self.my_assignment, shared_state)
+    }
+}
+
 /* WorkerAssignment */
 /* The subset of the total point-to-cluster assignment that this worker thread knows about.
  * Before assigning points to clusters, these are all the points assigned to the clusters this worker is responsible for.
@@ -202,6 +204,13 @@ impl<T> WorkerAssignment<T> {
             .map(|(other_tid, other_asg)| (other_tid, other_asg.extract()))
     }
 
+    // Extract and return the assignment for the current worker thread
+    fn extract_local_assignment(&mut self) -> (ThreadId, RemoteAssignment<T>) {
+        let this_thread = self.current_thread;
+        let local_asg = self.thread_assignments[this_thread].extract();
+        return (this_thread, local_asg);
+    }
+
     fn thread_iter_mut(&mut self) -> impl Iterator<Item=(ThreadId, &mut RemoteAssignment<T>)> {
         self.thread_assignments
             .iter_mut()
@@ -212,7 +221,22 @@ impl<T> WorkerAssignment<T> {
         self.thread_assignments[sender]
             .merge(remote_assignment)
     }
+
+    fn is_empty(&self) -> bool {
+        self.thread_assignments
+            .iter()
+            .all(|asg| asg.is_empty())
+    }
+
+    fn assign(&mut self, cluster_id: FullCentroidId, x: T) {
+        let (target_thread, cluster_in_thread) = cluster_id;
+        self.thread_assignments[target_thread]
+            .assign(cluster_in_thread, x)
+    }
 }
+
+type FullCentroidId    = (ThreadId, PartialCentroidId);
+type PartialCentroidId = usize;
 
 /* RemoteAssignment */
 // Subset of a WorkerAssignment corresponding to a given thread.
@@ -240,6 +264,97 @@ impl<T> RemoteAssignment<T> {
             .zip(other.0.iter_mut())
             .for_each(|(v, w)| v.append(w))
     }
+
+    fn assign(&mut self, target_cluster: PartialCentroidId, x: T) {
+        self.0[target_cluster].push(x)
+    }
+}
+
+/* point assignment */
+
+// Returns true if some points changed assignment, false otherwise
+// TODO share with the sequential code
+fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, shared_state: &SharedState) -> bool {
+    // 1. Extract the local points
+    //    This must be the only non-empty section of the assignment
+    let old_assignment = curr_asg.extract_local_assignment();
+    assert!(curr_asg.is_empty());
+    let new_assignment = curr_asg;
+
+    // 2. Move the points accordingly
+    let mut some_change = false;
+    let mut obvious_stay_count = 0;
+    let mut neighbour_cutoff_count = 0;
+    let mut moved_count = 0;
+    let mut stayed_count = 0;
+    for (cci, x) in old_assignment.into_iter()
+                            .enumerate()
+                            .flat_map(|(i, v)| v.into_iter()
+                                                .map(move |x| (i, x)))
+    {
+        // Start with the current centroid
+        let current_cluster = shared_state.get_centroid(cci);
+        let mut min_dist = current_cluster.dist(&x);
+        let mut closest_idx = Some(cci);
+
+        // Check if we can early stop
+        // TODO remove this 'if', it should be duplicate of the c_to_c_dist test below
+        if min_dist <= current_cluster.certainty_radius {
+            obvious_stay_count += 1;
+        }
+        else {
+            // TODO: explain this
+            let cluster_cutoff = 2.0 * min_dist;
+
+            // Go over the neighbouring centroids in distance order
+            for (tsi, c_to_c_dist) in current_cluster.neighbours.iter() {
+                if *c_to_c_dist > cluster_cutoff {
+                    neighbour_cutoff_count += 1;
+                    break;
+                }
+
+                let t_centroid = shared_state.get_centroid(*tsi);
+                let t_dist = t_centroid.dist(&x);
+
+                if t_dist < min_dist {
+                    min_dist = t_dist;
+                    closest_idx = Some(*tsi);
+                }
+
+                // This codepath almost never triggers but actually has a quite high impact on performance
+                /*
+                // Check if we can early stop
+                if t_dist <= clusters.certainty_radius(*tsi) {
+                    if closest_idx != Some(*tsi) {
+                        // The only case that seems to make sense is when the distance is equal
+                        assert_eq!(t_dist, min_dist, "{:?}", &clusters.neighbours[*tsi]);
+                        closest_idx = Some(*tsi);
+                    }
+                    cerainty_radius_count += 1;
+                    break;
+                }*/
+            }
+        }
+
+        let j = closest_idx.unwrap();
+        new_assignment.assign(x, j);
+
+        if cci != j {
+            some_change = true;
+            moved_count += 1;
+        }
+        else {
+            stayed_count += 1;
+        }
+    }
+
+    println!("Moved: {}, Stayed: {}", moved_count, stayed_count);
+    println!("Stopped early: {}", obvious_stay_count + neighbour_cutoff_count);
+    println!("Because of");
+    println!("..certainty radius of its previous centroid: {}", obvious_stay_count);
+    println!("..neighbour cutoff: {}", neighbour_cutoff_count);
+
+    return some_change;
 }
 
 /***************/
@@ -392,92 +507,6 @@ fn compute_neighbours<T: Point>(centroids: &[T], neighbours: &mut Neighbours) {
 fn update_neighbours<T: Point>(clusters: &mut Clusters<T>) {
     // Optimization: don't clear the buffer and keep it in the same order
     compute_neighbours(&clusters.centroids, &mut clusters.neighbours);
-}
-
-/* point assignment */
-
-// Returns true if some points changed assignment, false otherwise
-fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
-    // This is the dummiest method: full join
-
-    // 1. Extract all the vectors of points
-    let new_assignment = (0..clusters.len()).map(|_| Vec::new()).collect();
-    let old_assignment = std::mem::replace(&mut clusters.assignment, new_assignment);
-
-    // 2. Move the points accordingly
-    let mut some_change = false;
-    let mut obvious_stay_count = 0;
-    let mut neighbour_cutoff_count = 0;
-    let mut moved_count = 0;
-    let mut stayed_count = 0;
-    for (cci, x) in old_assignment.into_iter()
-                            .enumerate()
-                            .flat_map(|(i, v)| v.into_iter()
-                                                .map(move |x| (i, x)))
-    {
-        // Start with the current centroid
-        let current_cluster = &clusters.centroids[cci];
-        let mut min_dist = current_cluster.dist(&x);
-        let mut closest_idx = Some(cci);
-
-        // Check if we can early stop
-        // TODO remove this 'if', it should be duplicate of the c_to_c_dist test below
-        if min_dist <= clusters.certainty_radius(cci) {
-            obvious_stay_count += 1;
-        }
-        else {
-            // TODO: explain this
-            let cluster_cutoff = 2.0 * min_dist;
-
-            // Go over the neighbouring centroids in distance order
-            for (tsi, c_to_c_dist) in clusters.neighbours[cci].iter() {
-                if *c_to_c_dist > cluster_cutoff {
-                    neighbour_cutoff_count += 1;
-                    break;
-                }
-
-                let t_centroid = &clusters.centroids[*tsi];
-                let t_dist = t_centroid.dist(&x);
-
-                if t_dist < min_dist {
-                    min_dist = t_dist;
-                    closest_idx = Some(*tsi);
-                }
-
-                // This codepath almost never triggers but actually has a quite high impact on performance
-                /*
-                // Check if we can early stop
-                if t_dist <= clusters.certainty_radius(*tsi) {
-                    if closest_idx != Some(*tsi) {
-                        // The only case that seems to make sense is when the distance is equal
-                        assert_eq!(t_dist, min_dist, "{:?}", &clusters.neighbours[*tsi]);
-                        closest_idx = Some(*tsi);
-                    }
-                    cerainty_radius_count += 1;
-                    break;
-                }*/
-            }
-        }
-
-        let j = closest_idx.unwrap();
-        clusters.assignment[j].push(x);
-
-        if cci != j {
-            some_change = true;
-            moved_count += 1;
-        }
-        else {
-            stayed_count += 1;
-        }
-    }
-
-    println!("Moved: {}, Stayed: {}", moved_count, stayed_count);
-    println!("Stopped early: {}", obvious_stay_count + neighbour_cutoff_count);
-    println!("Because of");
-    println!("..certainty radius of its previous centroid: {}", obvious_stay_count);
-    println!("..neighbour cutoff: {}", neighbour_cutoff_count);
-
-    return some_change;
 }
 
 /* Public API for Clusters */
