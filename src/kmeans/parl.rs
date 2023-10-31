@@ -248,6 +248,15 @@ struct FullClusterId {
 }
 type FullCentroidId = FullClusterId;
 
+impl FullClusterId {
+    fn from(thread_id: ThreadId, cluster_in_thread: PartialClusterId) -> Self {
+        FullClusterId {
+            thread_id,
+            cluster_in_thread
+        }
+    }
+}
+
 type PartialClusterId  = usize;
 type PartialCentroidId = PartialClusterId;
 
@@ -290,6 +299,11 @@ impl<T> RemoteAssignment<T> {
         self.iter_clusters()
             .map(|data| data.len())
             .sum()
+    }
+
+    fn into_iter_clusters(self) -> impl Iterator<Item=(PartialCentroidId, Vec<T>)> {
+        self.0.into_iter()
+            .enumerate()
     }
 }
 
@@ -366,7 +380,7 @@ impl<T> WorkerAssignment<T> {
 fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, shared_state: &SharedState<T>) -> bool {
     // 1. Extract the local points
     //    This must be the only non-empty section of the assignment
-    let old_assignment = curr_asg.extract_local_assignment();
+    let (this_thread, old_assignment) = curr_asg.extract_local_assignment();
     assert!(curr_asg.is_empty());
     let new_assignment = curr_asg;
 
@@ -376,15 +390,17 @@ fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, shared_state:
     let mut neighbour_cutoff_count = 0;
     let mut moved_count = 0;
     let mut stayed_count = 0;
-    for (cci, x) in old_assignment.into_iter()
-                            .enumerate()
-                            .flat_map(|(i, v)| v.into_iter()
-                                                .map(move |x| (i, x)))
+    for (partial_cid, x) in old_assignment.into_iter_clusters()
+                            .flat_map(|(partial_cid, v)| v.into_iter()
+                                                            .map(move |x| (partial_cid, x)))
     {
+        // Note: we know for a fact that each data point starts assigned to the current thread
+        let prev_cluster_id = FullCentroidId::from(this_thread, partial_cid);
+
         // Start with the current centroid
-        let current_cluster = shared_state.get_centroid(cci);
+        let current_cluster = shared_state.get_centroid(prev_cluster_id);
         let mut min_dist = current_cluster.center_point.dist(&x);
-        let mut closest_idx = Some(cci);
+        let mut closest_idx = Some(prev_cluster_id);
 
         // Check if we can early stop
         // TODO remove this 'if', it should be duplicate of the c_to_c_dist test below
@@ -425,10 +441,10 @@ fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, shared_state:
             }
         }
 
-        let j = closest_idx.unwrap();
-        new_assignment.assign(j, x);
+        let new_cluster_id = closest_idx.unwrap();
+        new_assignment.assign(new_cluster_id, x);
 
-        if cci != j {
+        if prev_cluster_id != new_cluster_id {
             some_change = true;
             moved_count += 1;
         }
