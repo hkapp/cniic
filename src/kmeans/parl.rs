@@ -18,7 +18,7 @@ pub struct Clusters<T> {
 
 pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
     where I: Iterator<Item = T>,
-        T: Point
+        T: Point + Send
 {
     // Figure out how many threads to use
     let avail_threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
@@ -33,7 +33,9 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
 
     // Initialize the centroids
     // WARNING: we don't initialize the neighbours yet. Each thread will do this
-    let centroids = init_centroids();
+    let centroids: Vec<_> = assignments.iter()
+                                .map(|asg| init_centroids(&asg))
+                                .collect();
     //self.init_centroid_neighbours();
 
     // Build reader/writer pairs for the centroids
@@ -279,6 +281,16 @@ impl<T> RemoteAssignment<T> {
     fn assign(&mut self, target_cluster: PartialCentroidId, x: T) {
         self.0[target_cluster].push(x)
     }
+
+    fn iter_clusters(&self) -> impl Iterator<Item=&Vec<T>> {
+        self.0.iter()
+    }
+
+    fn len(&self) -> usize {
+        self.iter_clusters()
+            .map(|data| data.len())
+            .sum()
+    }
 }
 
 /* WorkerAssignment */
@@ -342,9 +354,8 @@ impl<T> WorkerAssignment<T> {
     }
 
     fn assign(&mut self, cluster_id: FullCentroidId, x: T) {
-        let (target_thread, cluster_in_thread) = cluster_id;
-        self.thread_assignments[target_thread]
-            .assign(cluster_in_thread, x)
+        self.thread_assignments[cluster_id.thread_id]
+            .assign(cluster_id.cluster_in_thread, x)
     }
 }
 
@@ -372,7 +383,7 @@ fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, shared_state:
     {
         // Start with the current centroid
         let current_cluster = shared_state.get_centroid(cci);
-        let mut min_dist = current_cluster.dist(&x);
+        let mut min_dist = current_cluster.center_point.dist(&x);
         let mut closest_idx = Some(cci);
 
         // Check if we can early stop
@@ -392,7 +403,7 @@ fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, shared_state:
                 }
 
                 let t_centroid = shared_state.get_centroid(*tsi);
-                let t_dist = t_centroid.dist(&x);
+                let t_dist = t_centroid.center_point.dist(&x);
 
                 if t_dist < min_dist {
                     min_dist = t_dist;
@@ -440,8 +451,6 @@ fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, shared_state:
 /*************************/
 // TODO: explain
 
-type Centroid<T> = T;
-
 fn build_centroid_reader_writer_pair<T>(clusters: Vec<Centroid<T>>) -> (CentroidReader<T>, CentroidWriter<T>) {
     let p = Arc::new(clusters);
     let reader = CentroidReader {
@@ -473,11 +482,27 @@ struct CentroidWriter<T> {
     p: Arc<Vec<Centroid<T>>>
 }
 
+/************/
+/* Centroid */
+/************/
 
+struct Centroid<T> {
+    center_point: T
+}
+
+impl<T: Point> Centroid<T> {
+    // This is basically seq::compute_centroids()
+    fn from(points: &[T]) -> Self {
+        Centroid {
+            center_point: T::mean(points)
+        }
+    }
+}
 
 /******************/
 /* Initialization */
 /******************/
+
 
 // TODO change this for a simpler vector chunk approach
 fn init_assignments<T, I>(points: &mut I, clusters_per_thread: &[usize]) -> Vec<RemoteAssignment<T>>
@@ -501,22 +526,19 @@ fn init_assignments<T, I>(points: &mut I, clusters_per_thread: &[usize]) -> Vec<
     return init_assignment;
 }
 
+// Initialize the centroids for a single thread
+// TODO share this with the sequential code
+fn init_centroids<T: Point>(assignment: &RemoteAssignment<T>) -> Vec<Centroid<T>> {
+    let nclusters = assignment.len();
+
+    assignment.iter_clusters()
+        .map(|cluster_data| Centroid::from(cluster_data))
+        .collect()
+}
+
 /* centroids */
 
 type Assignment<T> = Vec<Vec<T>>;
-
-fn init_centroids<T: Point>(assignment: &Assignment<T>) -> Vec<T> {
-    let nclusters = assignment.len();
-    let mut centroids = Vec::with_capacity(nclusters);
-    compute_centroids(&assignment, &mut centroids);
-    return centroids;
-}
-
-fn compute_centroids<T: Point>(assignment: &Assignment<T>, centroids: &mut Vec<T>) {
-    for points_in_cluster in assignment.iter() {
-        centroids.push(T::mean(&points_in_cluster));
-    }
-}
 
 fn update_centroids<T: Point>(clusters: &mut Clusters<T>) {
     // Note: Vec::clear() keeps the underlying allocated buffer, which is what we want
