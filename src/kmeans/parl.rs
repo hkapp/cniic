@@ -106,6 +106,7 @@ struct WorkerThread<T> {
     outwards:      Vec<Sender<Message<T>>>,
     my_assignment: WorkerAssignment<T>,
     my_clusters:   CentroidWriter<T>,
+    my_neighbours: Neighbours,
 }
 
 impl<T> WorkerThread<T> {
@@ -123,7 +124,8 @@ impl<T> WorkerThread<T> {
             inward,
             outwards,
             my_assignment: WorkerAssignment::from(thread_id, starting_assignment, clusters_per_thread),
-            my_clusters:   init_clusters
+            my_clusters:   init_clusters,
+            my_neighbours: Neighbours::new(thread_id, clusters_per_thread)
         }
     }
 
@@ -189,13 +191,15 @@ impl<T: Point> WorkerThread<T> {
     fn start(self, shared_state: &SharedState<T>) -> Self {
         let mut i_have_changes = true;
         while shared_state.consensus_continue(i_have_changes) {
-            self.update_centroid_neighbours();
+            // Note: this is local only, not read by anyone else
+            self.update_centroid_neighbours(shared_state);
             let local_changes = self.assign_points_to_clusters(shared_state);
             self.send_remote_assignments();
             // This effectively acts like a sync barrier
             let remote_changes = self.receive_remote_assignments(shared_state.nthreads);
             i_have_changes = local_changes || remote_changes;
             self.compute_centroids();
+            // Note: the while-loop condition performs sync after this step
         }
 
         return self;
@@ -215,6 +219,13 @@ impl<T: Point> WorkerThread<T> {
                 .unwrap()
                 .update_center(points_in_cluster);
         }
+    }
+
+    // This is local only, so not unsafe
+    fn update_centroid_neighbours(&mut self, shared_state: &SharedState<T>) {
+        // Note: the accesses to the SharedState for remote centroids are safe
+        // We are not modifying centroids in this phase, but only neighbours (which are local to each thread)
+        self.my_neighbours.update(self.thread_id, shared_state);
     }
 }
 
@@ -293,59 +304,6 @@ impl FullClusterId {
 
 type PartialClusterId  = usize;
 type PartialCentroidId = PartialClusterId;
-
-/* RemoteAssignment */
-// Subset of a WorkerAssignment corresponding to a given thread.
-struct RemoteAssignment<T> (Vec<Vec<T>>);
-
-impl<T> RemoteAssignment<T> {
-    fn new(nclusters: usize) -> Self {
-        let assignments = (0..nclusters).map(|_| Vec::new()).collect();
-        RemoteAssignment(assignments)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.0
-            .iter()
-            .all(|cluster_asg| cluster_asg.is_empty())
-    }
-
-    fn extract(&mut self) -> Self {
-        let new_empty = RemoteAssignment::new(self.0.len());
-        std::mem::replace(self, new_empty)
-    }
-
-    fn merge(&mut self, other: Self) {
-        assert_eq!(self.num_clusters(), other.num_clusters());
-        self.0.iter_mut()
-            .zip(other.0.iter_mut())
-            .for_each(|(v, w)| v.append(w))
-    }
-
-    fn assign(&mut self, target_cluster: PartialCentroidId, x: T) {
-        self.0[target_cluster].push(x)
-    }
-
-    fn iter_clusters(&self) -> impl Iterator<Item=(PartialClusterId, &Vec<T>)> {
-        self.0.iter()
-            .enumerate()
-    }
-
-    fn len(&self) -> usize {
-        self.iter_clusters()
-            .map(|(_, data)| data.len())
-            .sum()
-    }
-
-    fn into_iter_clusters(self) -> impl Iterator<Item=(PartialCentroidId, Vec<T>)> {
-        self.0.into_iter()
-            .enumerate()
-    }
-
-    fn num_clusters(&self) -> usize {
-        self.0.len()
-    }
-}
 
 /* WorkerAssignment */
 /* The subset of the total point-to-cluster assignment that this worker thread knows about.
@@ -432,6 +390,59 @@ impl<T> WorkerAssignment<T> {
 
     fn get_local_mut(&mut self) -> &mut RemoteAssignment<T> {
         &mut self.thread_assignments[self.current_thread]
+    }
+}
+
+/* RemoteAssignment */
+// Subset of a WorkerAssignment corresponding to a given thread.
+struct RemoteAssignment<T> (Vec<Vec<T>>);
+
+impl<T> RemoteAssignment<T> {
+    fn new(nclusters: usize) -> Self {
+        let assignments = (0..nclusters).map(|_| Vec::new()).collect();
+        RemoteAssignment(assignments)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0
+            .iter()
+            .all(|cluster_asg| cluster_asg.is_empty())
+    }
+
+    fn extract(&mut self) -> Self {
+        let new_empty = RemoteAssignment::new(self.0.len());
+        std::mem::replace(self, new_empty)
+    }
+
+    fn merge(&mut self, other: Self) {
+        assert_eq!(self.num_clusters(), other.num_clusters());
+        self.0.iter_mut()
+            .zip(other.0.iter_mut())
+            .for_each(|(v, w)| v.append(w))
+    }
+
+    fn assign(&mut self, target_cluster: PartialCentroidId, x: T) {
+        self.0[target_cluster].push(x)
+    }
+
+    fn iter_clusters(&self) -> impl Iterator<Item=(PartialClusterId, &Vec<T>)> {
+        self.0.iter()
+            .enumerate()
+    }
+
+    fn len(&self) -> usize {
+        self.iter_clusters()
+            .map(|(_, data)| data.len())
+            .sum()
+    }
+
+    fn into_iter_clusters(self) -> impl Iterator<Item=(PartialCentroidId, Vec<T>)> {
+        self.0.into_iter()
+            .enumerate()
+    }
+
+    fn num_clusters(&self) -> usize {
+        self.0.len()
     }
 }
 
@@ -594,6 +605,94 @@ impl<T: Point> Centroid<T> {
     }
 }
 
+/* Neighbours */
+// The first level indexes by PartialCentroidId
+//   These must be local to the current thread
+// The second level contains the ordered list of neighbours for the given local neighbour
+//   Note: the neighbour might be remote
+//   This level is ordered by the distance from the starting centroid, which is the second tuple item
+struct Neighbours (Vec<Vec<(FullCentroidId, f64)>>);
+
+impl Neighbours {
+    // Adapted from seq::init_neighbours
+    fn new(this_thread: ThreadId, clusters_per_thread: &[usize]) -> Self {
+        let num_local_clusters = clusters_per_thread[this_thread];
+        let nthreads = clusters_per_thread.len();
+
+        let mut all_neighbours = Vec::with_capacity(num_local_clusters);
+
+        for src_partial_id in 0..num_local_clusters {
+            let src_id = FullCentroidId::from(this_thread, src_partial_id);
+            let neighbour_ids = (0..nthreads)
+                                    .flat_map(|dst_thread| (0..clusters_per_thread[dst_thread])
+                                                            .map(|dst_cluster_in_thread| FullCentroidId::from(dst_thread, dst_cluster_in_thread)))
+                                    .filter(|dst_id| dst_id != &src_id);
+            let neigh_list = neighbour_ids.map(|dst_id| (dst_id, f64::INFINITY));
+            all_neighbours.push(neigh_list.collect());
+        }
+
+        Neighbours(all_neighbours)
+    }
+
+    // Adapted from seq::compute_neighbours
+    fn update<T: Point>(&mut self, this_thread: ThreadId, shared_state: &SharedState<T>) {
+        let mut sort_count = 0;
+        // Go over all the local centroid neighbour lists
+        for (partial_cid, neigh_list) in self.0.iter_mut().enumerate() {
+            let local_cid = FullCentroidId::from(this_thread, partial_cid);
+            let local_centroid = shared_state.get_centroid(local_cid);
+
+            // Update the distance to each neighbour for this local centroid
+            for neigh_info in neigh_list.iter_mut() {
+                // TODO: consider naming these tuple fields
+                let neigh_centroid = shared_state.get_centroid(neigh_info.0);
+                neigh_info.1 = local_centroid.center_point.dist(&neigh_centroid.center_point);
+                assert!(neigh_info.1.is_finite());
+            }
+
+            // Optimization: consider it "good enough" if the first sqrt(nclusters) are sorted
+            // This leads to imprecision. Though when we get to the point where the first sqrt(nclusters)
+            // remain sorted, we can assume that the points don't go so far in the list of neighbours anymore
+            let check_n_sorted = (neigh_list.len() as f64).sqrt() as usize;
+            let already_sorted = neigh_list
+                                    .windows(2)
+                                    .take(check_n_sorted)
+                                    .find(|xs| xs[0].1 > xs[1].1)
+                                    .is_none();
+
+            if !already_sorted {
+                sort_count += 1;
+                // Optimization: use unstable sorting
+                // We don't care about the stability of the ordering, we're interested in speed
+                neigh_list.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b)
+                                                                .ok_or_else(|| format!("{} <> {}", a, b))
+                                                                .unwrap());
+            }
+        }
+        println!("Sorted {} times", sort_count);
+    }
+}
+
+//type Neighbours = Vec<Vec<(usize, f64)>>;
+
+/*fn init_neighbours<T: Point>(centroids: &[T]) -> Neighbours {
+    let nclusters = centroids.len();
+    let mut neighbours = (0..nclusters)  // for each clusters
+                            .map(|i|
+                                (0..nclusters)  // generate neighbours
+                                .filter(|j| *j != i)  // can't be self
+                                .map(|j| (j, 0.0))
+                                .collect())
+                            .collect();
+    compute_neighbours(&centroids, &mut neighbours);
+    return neighbours;
+}*/
+
+/*fn update_neighbours<T: Point>(clusters: &mut Clusters<T>) {
+    // Optimization: don't clear the buffer and keep it in the same order
+    compute_neighbours(&clusters.centroids, &mut clusters.neighbours);
+}*/
+
 /******************/
 /* Initialization */
 /******************/
@@ -633,64 +732,13 @@ fn init_centroids<T: Point>(assignment: &RemoteAssignment<T>) -> Vec<Centroid<T>
 
 /* centroids */
 
-type Assignment<T> = Vec<Vec<T>>;
+/*type Assignment<T> = Vec<Vec<T>>;
 
 fn update_centroids<T: Point>(clusters: &mut Clusters<T>) {
     // Note: Vec::clear() keeps the underlying allocated buffer, which is what we want
     clusters.centroids.clear();
     compute_centroids(&clusters.assignment, &mut clusters.centroids);
-}
-
-/* neighbours */
-
-type Neighbours = Vec<Vec<(usize, f64)>>;
-
-fn init_neighbours<T: Point>(centroids: &[T]) -> Neighbours {
-    let nclusters = centroids.len();
-    let mut neighbours = (0..nclusters)  // for each clusters
-                            .map(|i|
-                                (0..nclusters)  // generate neighbours
-                                .filter(|j| *j != i)  // can't be self
-                                .map(|j| (j, 0.0))
-                                .collect())
-                            .collect();
-    compute_neighbours(&centroids, &mut neighbours);
-    return neighbours;
-}
-
-// Optimization: keep the array in the previous order
-// There are good chances that the array is already sorted in this case
-fn compute_neighbours<T: Point>(centroids: &[T], neighbours: &mut Neighbours) {
-    let mut sort_count = 0;
-    for (i, c) in centroids.iter().enumerate() {
-        for neigh in neighbours[i].iter_mut() {
-            neigh.1 = c.dist(&centroids[neigh.0]);
-            assert!(neigh.1.is_finite());
-        }
-
-        let already_sorted = neighbours[i]
-                                .windows(2)
-                                // Optimization: consider it "good enough" if the first sqrt(nclusters) are sorted
-                                // This leads to imprecision. Though when we get to the point where the first sqrt(nclusters)
-                                // remain sorted, we can assume that the points don't go so far in the list of neighbours anymore
-                                .take((centroids.len() as f64).sqrt() as usize)
-                                .find(|xs| xs[0].1 > xs[1].1)
-                                .is_none();
-        //let already_sorted=false;
-        if !already_sorted {
-            sort_count += 1;
-            // Optimization: use unstable sorting
-            // We don't care about the stability of the ordering, we're interested in speed
-            neighbours[i].sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).ok_or_else(|| format!("{} <> {}", a, b)).unwrap());
-        }
-    }
-    println!("Sorted {} times", sort_count);
-}
-
-fn update_neighbours<T: Point>(clusters: &mut Clusters<T>) {
-    // Optimization: don't clear the buffer and keep it in the same order
-    compute_neighbours(&clusters.centroids, &mut clusters.neighbours);
-}
+}*/
 
 /* Public API for Clusters */
 
