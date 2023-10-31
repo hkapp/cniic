@@ -210,7 +210,10 @@ impl<T: Point> WorkerThread<T> {
         let local_asg = self.my_assignment.get_local();
 
         for (i, points_in_cluster) in local_asg.iter_clusters() {
-            self.my_clusters.write(i, points_in_cluster);
+            self.my_clusters
+                .get_mut(i)
+                .unwrap()
+                .update_center(points_in_cluster);
         }
     }
 }
@@ -557,6 +560,18 @@ struct CentroidWriter<T> {
     p: Arc<Vec<Centroid<T>>>
 }
 
+impl<T> CentroidWriter<T> {
+    unsafe fn write(&mut self, cluster_id: PartialCentroidId, data: Centroid<T>) {
+        *self.get_mut(cluster_id).unwrap() = data;
+    }
+
+    unsafe fn get_mut(&mut self, cluster_id: PartialCentroidId) -> Option<&mut Centroid<T>> {
+        let ptr = Arc::as_ptr(&self.p).cast_mut();
+        let mut_data = ptr.as_mut().unwrap();
+        mut_data.get_mut(cluster_id)
+    }
+}
+
 /************/
 /* Centroid */
 /************/
@@ -571,6 +586,11 @@ impl<T: Point> Centroid<T> {
         Centroid {
             center_point: T::mean(points)
         }
+    }
+
+    // This is basically seq::compute_centroids()
+    fn update_center(&mut self, points: &[T]) {
+        self.center_point = T::mean(points);
     }
 }
 
