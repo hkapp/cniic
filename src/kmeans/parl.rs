@@ -206,7 +206,7 @@ impl<T: Point> WorkerThread<T> {
     }
 
     fn assign_points_to_clusters(&mut self, shared_state: &SharedState<T>) -> bool {
-        assign_points_seq(&mut self.my_assignment, shared_state)
+        assign_points_seq(&mut self.my_assignment, &self.my_neighbours, shared_state)
     }
 
     unsafe fn compute_centroids(&mut self) {
@@ -450,7 +450,7 @@ impl<T> RemoteAssignment<T> {
 
 // Returns true if some points changed assignment, false otherwise
 // TODO share with the sequential code
-fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, shared_state: &SharedState<T>) -> bool {
+fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, all_neighbours: &Neighbours, shared_state: &SharedState<T>) -> bool {
     // 1. Extract the local points
     //    This must be the only non-empty section of the assignment
     let (this_thread, old_assignment) = curr_asg.extract_local_assignment();
@@ -477,7 +477,7 @@ fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, shared_state:
 
         // Check if we can early stop
         // TODO remove this 'if', it should be duplicate of the c_to_c_dist test below
-        if min_dist <= current_cluster.certainty_radius {
+        if min_dist <= certainty_radius(prev_cluster_id, all_neighbours) {
             obvious_stay_count += 1;
         }
         else {
@@ -485,18 +485,18 @@ fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, shared_state:
             let cluster_cutoff = 2.0 * min_dist;
 
             // Go over the neighbouring centroids in distance order
-            for (tsi, c_to_c_dist) in current_cluster.neighbours.iter() {
-                if *c_to_c_dist > cluster_cutoff {
+            for other_cluster in all_neighbours.neighbours_of(partial_cid) {
+                if other_cluster.neigh_dist > cluster_cutoff {
                     neighbour_cutoff_count += 1;
                     break;
                 }
 
-                let t_centroid = shared_state.get_centroid(*tsi);
+                let t_centroid = shared_state.get_centroid(other_cluster.neigh_id);
                 let t_dist = t_centroid.center_point.dist(&x);
 
                 if t_dist < min_dist {
                     min_dist = t_dist;
-                    closest_idx = Some(*tsi);
+                    closest_idx = Some(other_cluster.neigh_id);
                 }
 
                 // This codepath almost never triggers but actually has a quite high impact on performance
@@ -611,7 +611,12 @@ impl<T: Point> Centroid<T> {
 // The second level contains the ordered list of neighbours for the given local neighbour
 //   Note: the neighbour might be remote
 //   This level is ordered by the distance from the starting centroid, which is the second tuple item
-struct Neighbours (Vec<Vec<(FullCentroidId, f64)>>);
+struct Neighbours (Vec<Vec<NeighInfo>>);
+
+struct NeighInfo {
+    neigh_id:   FullCentroidId,
+    neigh_dist: f64
+}
 
 impl Neighbours {
     // Adapted from seq::init_neighbours
@@ -627,7 +632,7 @@ impl Neighbours {
                                     .flat_map(|dst_thread| (0..clusters_per_thread[dst_thread])
                                                             .map(|dst_cluster_in_thread| FullCentroidId::from(dst_thread, dst_cluster_in_thread)))
                                     .filter(|dst_id| dst_id != &src_id);
-            let neigh_list = neighbour_ids.map(|dst_id| (dst_id, f64::INFINITY));
+            let neigh_list = neighbour_ids.map(|dst_id| NeighInfo { neigh_id: dst_id, neigh_dist: f64::INFINITY});
             all_neighbours.push(neigh_list.collect());
         }
 
@@ -644,10 +649,9 @@ impl Neighbours {
 
             // Update the distance to each neighbour for this local centroid
             for neigh_info in neigh_list.iter_mut() {
-                // TODO: consider naming these tuple fields
-                let neigh_centroid = shared_state.get_centroid(neigh_info.0);
-                neigh_info.1 = local_centroid.center_point.dist(&neigh_centroid.center_point);
-                assert!(neigh_info.1.is_finite());
+                let neigh_centroid = shared_state.get_centroid(neigh_info.neigh_id);
+                neigh_info.neigh_dist = local_centroid.center_point.dist(&neigh_centroid.center_point);
+                assert!(neigh_info.neigh_dist.is_finite());
             }
 
             // Optimization: consider it "good enough" if the first sqrt(nclusters) are sorted
@@ -657,19 +661,23 @@ impl Neighbours {
             let already_sorted = neigh_list
                                     .windows(2)
                                     .take(check_n_sorted)
-                                    .find(|xs| xs[0].1 > xs[1].1)
+                                    .find(|xs| xs[0].neigh_dist > xs[1].neigh_dist)
                                     .is_none();
 
             if !already_sorted {
                 sort_count += 1;
                 // Optimization: use unstable sorting
                 // We don't care about the stability of the ordering, we're interested in speed
-                neigh_list.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b)
-                                                                .ok_or_else(|| format!("{} <> {}", a, b))
+                neigh_list.sort_unstable_by(|a, b| a.neigh_dist.partial_cmp(&b.neigh_dist)
+                                                                .ok_or_else(|| format!("{} <> {}", a.neigh_dist, b.neigh_dist))
                                                                 .unwrap());
             }
         }
         println!("Sorted {} times", sort_count);
+    }
+
+    fn neighbours_of(&self, local_cluster_id: PartialCentroidId) -> &[NeighInfo] {
+        &self.0[local_cluster_id]
     }
 }
 
