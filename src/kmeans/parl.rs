@@ -16,13 +16,14 @@ pub struct Clusters<T> {
     neighbours:      Vec<Vec<(usize, f64)>>, // ordered
 }
 
-pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
+pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> impl Iterator<Item=Vec<T>>
     where I: Iterator<Item = T>,
-        T: Point + Send + Sync
+        T: Point + Send + Sync + 'static
 {
     // Figure out how many threads to use
     let avail_threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let nthreads = avail_threads.min(nclusters);
+    println!("Using {} threads", nthreads);
 
     // Split the clusters per threads
     let clusters_per_thread = distribute_clusters(nthreads, nclusters);
@@ -47,6 +48,7 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
                     .unzip();
 
     let shared_state = SharedState::new(nthreads, centroid_readers);
+    let shared_state = Arc::new(shared_state);
 
     let (senders, receivers): (Vec<_>, Vec<_>) = (0..nthreads)
                                                         .map(|_| mpsc::channel())
@@ -64,14 +66,26 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
         let messages_receive = receivers_iter.next().unwrap();
 
         let w = WorkerThread::new(thread_id, local_assignment, &clusters_per_thread, assigned_centroids, messages_receive, messages_send);
+        let shr = Arc::clone(&shared_state);
 
+        // Note: use Arc on the SharedState to make the borrow checker happy
         workers.push(
             thread::spawn(||
-                w.start(&shared_state)));
+                w.start(shr)));
     }
 
     workers.into_iter()
-        .for_each(|w| w.join().unwrap());
+        // Wait for the thread to finish
+        .map(|w| w.join().unwrap())
+        // Extract the local assignment for that thread
+        .map(|mut final_thread_state| {
+            let (_, local_assignment) = final_thread_state.my_assignment.extract_local_assignment();
+            assert!(final_thread_state.my_assignment.is_empty());
+            local_assignment
+        })
+        // Merge the results into a single iterator
+        .flat_map(|asg| asg.into_iter_clusters()
+                            .map(|(_, points_in_cluster)| points_in_cluster))
 }
 
 // Returns how many clusters for each thread, as evenly distributed as possible
@@ -188,12 +202,12 @@ impl<T> WorkerThread<T> {
 }
 
 impl<T: Point> WorkerThread<T> {
-    fn start(self, shared_state: &SharedState<T>) -> Self {
+    fn start(self, shared_state: Arc<SharedState<T>>) -> Self {
         let mut i_have_changes = true;
         while shared_state.consensus_continue(i_have_changes) {
             // Note: this is local only, not read by anyone else
-            self.update_centroid_neighbours(shared_state);
-            let local_changes = self.assign_points_to_clusters(shared_state);
+            self.update_centroid_neighbours(&shared_state);
+            let local_changes = self.assign_points_to_clusters(&shared_state);
             self.send_remote_assignments();
             // This effectively acts like a sync barrier
             let remote_changes = self.receive_remote_assignments(shared_state.nthreads);
