@@ -1,7 +1,7 @@
 use super::Point;
 use std::collections::HashSet;
 use std::thread;
-use std::sync::Barrier;
+use std::sync::{Arc, Barrier};
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::mpsc::{self, Sender, Receiver};
 
@@ -20,13 +20,30 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
     where I: Iterator<Item = T>,
         T: Point
 {
+    // Figure out how many threads to use
     let avail_threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let nthreads = avail_threads.min(nclusters);
 
+    // Split the clusters per threads
     let clusters_per_thread = distribute_clusters(nthreads, nclusters);
     println!("Clusters per thread: {:?}", &clusters_per_thread);
 
-    let shared_state = SharedState::new(nthreads);
+    // Split the data per thread
+    let assignments = init_assignments(points, &clusters_per_thread);
+
+    // Initialize the centroids
+    // WARNING: we don't initialize the neighbours yet. Each thread will do this
+    let centroids = init_centroids();
+    //self.init_centroid_neighbours();
+
+    // Build reader/writer pairs for the centroids
+    // Each worker thread will get a writer
+    // The SharedState will keep the readers
+    let (centroid_readers, centroid_writers) = centroids.into_iter()
+                                                .map(|thread_clusters| build_centroid_reader_writer_pair(thread_clusters))
+                                                .unzip();
+
+    let shared_state = SharedState::new(nthreads, centroid_readers);
 
     let (senders, mut receivers): (Vec<_>, Vec<_>) = (0..nthreads)
                                                         .map(|_| mpsc::channel())
@@ -61,6 +78,59 @@ fn distribute_clusters(nthreads: usize, nclusters: usize) -> Vec<usize> {
 
     assert_eq!({let s: usize = distribution.iter().sum(); s}, nclusters);
     return distribution;
+}
+
+/***************/
+/* SharedState */
+/***************/
+
+struct SharedState<T> {
+    nthreads:           usize,
+    anyone_has_changes: AtomicBool,
+    barrier:            Barrier,
+    centroids:          Vec<CentroidReader<T>>,  // indexed by ThreadId
+}
+
+impl<T> SharedState<T> {
+    fn new(nthreads: usize, centroid_readers: Vec<CentroidReader<T>>) -> Self {
+        SharedState {
+            nthreads,
+            // WARNING: this starting value is very important
+            // See consensus_continue()
+            anyone_has_changes: AtomicBool::new(false),
+            barrier:            Barrier::new(nthreads),
+            centroids:          centroid_readers,
+        }
+    }
+
+    // If any thread has changes, this returns true
+    fn consensus_continue(&self, i_have_changes: bool) -> bool {
+        if i_have_changes {
+            self.anyone_has_changes.store(true, ATOMIC_ORDERING);
+        }
+
+        // Wait for every thread to get to this point
+        let barrier_result = self.barrier.wait();
+
+        let should_continue = self.anyone_has_changes.load(ATOMIC_ORDERING);
+        if should_continue && barrier_result.is_leader() {
+            // Reset the "has_any_changes" for the next round
+            // We only need one thread to do that, hence the use of "is_leader()"
+            // WARNING: technically the leader thread could starve until another thread gets back
+            // to this consensus function
+            self.anyone_has_changes.store(false, ATOMIC_ORDERING)
+        }
+
+        return should_continue;
+    }
+
+    fn get_centroid(&self, c: FullCentroidId) -> &Centroid<T> {
+        unsafe {
+            self.centroids[c.thread_id]
+                .read(c.cluster_in_thread)
+                .unwrap()
+        }
+    }
 }
 
 /*****************/
@@ -145,10 +215,7 @@ impl<T> WorkerThread<T> {
 }
 
 impl<T: Point> WorkerThread<T> {
-    fn start(self, shared_state: &SharedState) -> Self {
-        self.init_centroids();
-        self.init_centroid_neighbours();
-
+    fn start(self, shared_state: &SharedState<T>) -> Self {
         let mut i_have_changes = true;
         while shared_state.consensus_continue(i_have_changes) {
             self.update_centroid_neighbours();
@@ -163,8 +230,54 @@ impl<T: Point> WorkerThread<T> {
         return self;
     }
 
-    fn assign_points_to_clusters(&mut self, shared_state: &SharedState) -> bool {
+    fn assign_points_to_clusters(&mut self, shared_state: &SharedState<T>) -> bool {
         assign_points_seq(&mut self.my_assignment, shared_state)
+    }
+}
+
+/********************/
+/* Point assignment */
+/********************/
+
+#[derive(PartialEq, Eq)]
+struct FullClusterId {
+    thread_id:         ThreadId,
+    cluster_in_thread: PartialClusterId
+}
+type FullCentroidId = FullClusterId;
+
+type PartialClusterId  = usize;
+type PartialCentroidId = PartialClusterId;
+
+/* RemoteAssignment */
+// Subset of a WorkerAssignment corresponding to a given thread.
+struct RemoteAssignment<T> (Vec<Vec<T>>);
+
+impl<T> RemoteAssignment<T> {
+    fn new(nclusters: usize) -> Self {
+        let assignments = (0..nclusters).map(|_| Vec::new()).collect();
+        RemoteAssignment(assignments)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0
+            .iter()
+            .all(|cluster_asg| cluster_asg.is_empty())
+    }
+
+    fn extract(&mut self) -> Self {
+        let new_empty = RemoteAssignment::new(self.0.len());
+        std::mem::replace(self, new_empty)
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.0.iter_mut()
+            .zip(other.0.iter_mut())
+            .for_each(|(v, w)| v.append(w))
+    }
+
+    fn assign(&mut self, target_cluster: PartialCentroidId, x: T) {
+        self.0[target_cluster].push(x)
     }
 }
 
@@ -235,46 +348,11 @@ impl<T> WorkerAssignment<T> {
     }
 }
 
-type FullCentroidId    = (ThreadId, PartialCentroidId);
-type PartialCentroidId = usize;
-
-/* RemoteAssignment */
-// Subset of a WorkerAssignment corresponding to a given thread.
-struct RemoteAssignment<T> (Vec<Vec<T>>);
-
-impl<T> RemoteAssignment<T> {
-    fn new(nclusters: usize) -> Self {
-        let assignments = (0..nclusters).map(|_| Vec::new()).collect();
-        RemoteAssignment(assignments)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.0
-            .iter()
-            .all(|cluster_asg| cluster_asg.is_empty())
-    }
-
-    fn extract(&mut self) -> Self {
-        let new_empty = RemoteAssignment::new(self.0.len());
-        std::mem::replace(self, new_empty)
-    }
-
-    fn merge(&mut self, other: Self) {
-        self.0.iter_mut()
-            .zip(other.0.iter_mut())
-            .for_each(|(v, w)| v.append(w))
-    }
-
-    fn assign(&mut self, target_cluster: PartialCentroidId, x: T) {
-        self.0[target_cluster].push(x)
-    }
-}
-
 /* point assignment */
 
 // Returns true if some points changed assignment, false otherwise
 // TODO share with the sequential code
-fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, shared_state: &SharedState) -> bool {
+fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, shared_state: &SharedState<T>) -> bool {
     // 1. Extract the local points
     //    This must be the only non-empty section of the assignment
     let old_assignment = curr_asg.extract_local_assignment();
@@ -337,7 +415,7 @@ fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, shared_state:
         }
 
         let j = closest_idx.unwrap();
-        new_assignment.assign(x, j);
+        new_assignment.assign(j, x);
 
         if cci != j {
             some_change = true;
@@ -357,87 +435,75 @@ fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, shared_state:
     return some_change;
 }
 
-/***************/
-/* SharedState */
-/***************/
+/*************************/
+/* CentroidReader/Writer */
+/*************************/
+// TODO: explain
 
-struct SharedState {
-    nthreads:           usize,
-    anyone_has_changes: AtomicBool,
-    barrier:            Barrier,
+type Centroid<T> = T;
+
+fn build_centroid_reader_writer_pair<T>(clusters: Vec<Centroid<T>>) -> (CentroidReader<T>, CentroidWriter<T>) {
+    let p = Arc::new(clusters);
+    let reader = CentroidReader {
+        p: Arc::clone(&p)
+    };
+    let writer = CentroidWriter {
+        p: p
+    };
+    return (reader, writer);
 }
 
-impl SharedState {
-    fn new(nthreads: usize) -> Self {
-        SharedState {
-            nthreads,
-            // WARNING: this starting value is very important
-            // See consensus_continue()
-            anyone_has_changes: AtomicBool::new(false),
-            barrier:            Barrier::new(nthreads),
-        }
+/* CentroidReader */
+struct CentroidReader<T> {
+    p: Arc<Vec<Centroid<T>>>
+}
+
+impl<T> CentroidReader<T> {
+    unsafe fn read(&self, cluster_id: PartialCentroidId) -> Option<&Centroid<T>> {
+        // Note: also take this as a pointer when reading to make sure that Rust
+        // doesn't make any assumptions about its content (e.g. caching)
+        let ptr = Arc::as_ptr(&self.p);
+        let data = ptr.as_ref().unwrap();
+        data.get(cluster_id)
     }
+}
 
-    // If any thread has changes, this returns true
-    fn consensus_continue(&self, i_have_changes: bool) -> bool {
-        if i_have_changes {
-            self.anyone_has_changes.store(true, ATOMIC_ORDERING);
-        }
-
-        // Wait for every thread to get to this point
-        let barrier_result = self.barrier.wait();
-
-        let should_continue = self.anyone_has_changes.load(ATOMIC_ORDERING);
-        if should_continue && barrier_result.is_leader() {
-            // Reset the "has_any_changes" for the next round
-            // We only need one thread to do that, hence the use of "is_leader()"
-            // WARNING: technically the leader thread could starve until another thread gets back
-            // to this consensus function
-            self.anyone_has_changes.store(false, ATOMIC_ORDERING)
-        }
-
-        return should_continue;
-    }
+/* CentroidWriter */
+struct CentroidWriter<T> {
+    p: Arc<Vec<Centroid<T>>>
 }
 
 
 
-type Assignment<T> = Vec<Vec<T>>;
+/******************/
+/* Initialization */
+/******************/
 
-// Consider requiring ExactSizeIterator
-fn init_assignment<T, I>(points: &mut I, nclusters: usize) -> Assignment<T>
+// TODO change this for a simpler vector chunk approach
+fn init_assignments<T, I>(points: &mut I, clusters_per_thread: &[usize]) -> Vec<RemoteAssignment<T>>
     where I: Iterator<Item = T>,
         T: Point
 {
-    let mut init_assignment = Vec::with_capacity(nclusters);
-    for _ in 0..nclusters {
-        init_assignment.push(Vec::new());
-    }
+    let nthreads = clusters_per_thread.len();
 
-    for (i, x) in points.enumerate() {
-        let vec = init_assignment.get_mut(i % nclusters).unwrap();
-        vec.push(x);
+    let mut init_assignment: Vec<RemoteAssignment<T>> = (0..nthreads).map(|i| RemoteAssignment::new(clusters_per_thread[i])).collect();
+
+    for (i, j) in (0..nthreads)
+                    .flat_map(|i| (0..clusters_per_thread[i])
+                                    .map(|j| (i, j)))
+                    .cycle()
+    {
+        let x = points.next().unwrap();
+        init_assignment[i].assign(j, x);
     }
+    assert!(points.next().is_none());
 
     return init_assignment;
 }
 
-fn init<T, I>(points: &mut I, nclusters: usize) -> Clusters<T>
-    where I: Iterator<Item = T>,
-        T: Point
-{
-    let assignment = init_assignment(points, nclusters);
-    let centroids  = init_centroids(&assignment);
-    let neighbours = init_neighbours(&centroids);
-
-    Clusters {
-        assignment,
-        centroids,
-        neighbours
-    }
-}
-
 /* centroids */
+
+type Assignment<T> = Vec<Vec<T>>;
 
 fn init_centroids<T: Point>(assignment: &Assignment<T>) -> Vec<T> {
     let nclusters = assignment.len();
