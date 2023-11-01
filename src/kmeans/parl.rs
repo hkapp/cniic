@@ -1,7 +1,8 @@
 use super::Point;
 use std::collections::HashSet;
+use std::ops::Index;
 use std::thread;
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::mpsc::{self, Sender, Receiver};
 
@@ -39,15 +40,7 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> impl Iterator<Item=Vec
                                 .collect();
     //self.init_centroid_neighbours();
 
-    // Build reader/writer pairs for the centroids
-    // Each worker thread will get a writer
-    // The SharedState will keep the readers
-    let (centroid_readers, centroid_writers): (Vec<_>, Vec<_>) =
-            centroids.into_iter()
-                    .map(|thread_clusters| build_centroid_reader_writer_pair(thread_clusters))
-                    .unzip();
-
-    let shared_state = SharedState::new(nthreads, centroid_readers);
+    let shared_state = SharedState::new(nthreads, centroids);
     let shared_state = Arc::new(shared_state);
 
     let (senders, receivers): (Vec<_>, Vec<_>) = (0..nthreads)
@@ -56,16 +49,14 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> impl Iterator<Item=Vec
 
     let mut workers = Vec::new();
     let mut all_assignments = assignments.into_iter();
-    let mut centroids_iter = centroid_writers.into_iter();
     let mut receivers_iter = receivers.into_iter();
 
     for thread_id in 0..nthreads {
         let local_assignment = all_assignments.next().unwrap();
-        let assigned_centroids = centroids_iter.next().unwrap();
         let messages_send = senders.clone();
         let messages_receive = receivers_iter.next().unwrap();
 
-        let w = WorkerThread::new(thread_id, local_assignment, &clusters_per_thread, assigned_centroids, messages_receive, messages_send);
+        let w = WorkerThread::new(thread_id, local_assignment, &clusters_per_thread, messages_receive, messages_send);
         let shr = Arc::clone(&shared_state);
 
         // Note: use Arc on the SharedState to make the borrow checker happy
@@ -119,7 +110,6 @@ struct WorkerThread<T> {
     inward:        Receiver<Message<T>>,
     outwards:      Vec<Sender<Message<T>>>,
     my_assignment: WorkerAssignment<T>,
-    my_clusters:   CentroidWriter<T>,
     my_neighbours: Neighbours,
 }
 
@@ -128,7 +118,6 @@ impl<T> WorkerThread<T> {
         thread_id:           ThreadId,
         starting_assignment: RemoteAssignment<T>,
         clusters_per_thread: &[usize],
-        init_clusters:       CentroidWriter<T>,
         inward:              Receiver<Message<T>>,
         outwards:            Vec<Sender<Message<T>>>)
         -> Self
@@ -138,7 +127,6 @@ impl<T> WorkerThread<T> {
             inward,
             outwards,
             my_assignment: WorkerAssignment::from(thread_id, starting_assignment, clusters_per_thread),
-            my_clusters:   init_clusters,
             my_neighbours: Neighbours::new(thread_id, clusters_per_thread)
         }
     }
@@ -210,13 +198,13 @@ impl<T: Point> WorkerThread<T> {
         let mut i_have_changes = true;
         while shared_state.consensus_continue(i_have_changes) {
             // Note: this is local only, not read by anyone else
-            self.update_centroid_neighbours(&shared_state);
+            self.update_centroid_neighbours(&shared_state.centroid_reader());
             let local_changes = self.assign_points_to_clusters(&shared_state);
             self.send_remote_assignments();
             // This effectively acts like a sync barrier
             let remote_changes = self.receive_remote_assignments(shared_state.nthreads);
             i_have_changes = local_changes || remote_changes;
-            self.compute_centroids();
+            self.compute_centroids(&shared_state);
             // Note: the while-loop condition performs sync after this step
         }
 
@@ -224,26 +212,24 @@ impl<T: Point> WorkerThread<T> {
     }
 
     fn assign_points_to_clusters(&mut self, shared_state: &SharedState<T>) -> bool {
-        assign_points_seq(&mut self.my_assignment, &self.my_neighbours, shared_state)
+        assign_points_seq(&mut self.my_assignment, &self.my_neighbours, &shared_state.centroid_reader())
     }
 
-    unsafe fn compute_centroids(&mut self) {
+    fn compute_centroids(&self, shared_state: &SharedState<T>) {
         // We only consider the points assigned to this thread
         let local_asg = self.my_assignment.get_local();
+        let mut centroid_writer = shared_state.centroids
+                                    .get_write_access(self.thread_id);
 
         for (i, points_in_cluster) in local_asg.iter_clusters() {
-            self.my_clusters
-                .get_mut(i)
-                .unwrap()
-                .update_center(points_in_cluster);
+            centroid_writer[i].update_center(points_in_cluster);
         }
     }
 
-    // This is local only, so not unsafe
-    fn update_centroid_neighbours(&mut self, shared_state: &SharedState<T>) {
-        // Note: the accesses to the SharedState for remote centroids are safe
-        // We are not modifying centroids in this phase, but only neighbours (which are local to each thread)
-        self.my_neighbours.update(self.thread_id, shared_state);
+    // This is local only
+    // Note: we're not updating the centroids in this phase, only their neighbours, which are always local.
+    fn update_centroid_neighbours(&mut self, centroid_reader: &CentroidReader<T>) {
+        self.my_neighbours.update(self.thread_id, centroid_reader);
     }
 }
 
@@ -255,18 +241,18 @@ struct SharedState<T> {
     nthreads:           usize,
     anyone_has_changes: AtomicBool,
     barrier:            Barrier,
-    centroids:          Vec<CentroidReader<T>>,  // indexed by ThreadId
+    centroids:          RwCentroids<T>,
 }
 
 impl<T> SharedState<T> {
-    fn new(nthreads: usize, centroid_readers: Vec<CentroidReader<T>>) -> Self {
+    fn new(nthreads: usize, centroids: Vec<Vec<Centroid<T>>>) -> Self {
         SharedState {
             nthreads,
             // WARNING: this starting value is very important
             // See consensus_continue()
             anyone_has_changes: AtomicBool::new(false),
             barrier:            Barrier::new(nthreads),
-            centroids:          centroid_readers,
+            centroids:          RwCentroids::new(centroids)
         }
     }
 
@@ -291,12 +277,8 @@ impl<T> SharedState<T> {
         return should_continue;
     }
 
-    fn get_centroid(&self, c: FullCentroidId) -> &Centroid<T> {
-        unsafe {
-            self.centroids[c.thread_id]
-                .read(c.cluster_in_thread)
-                .unwrap()
-        }
+    fn centroid_reader(&self) -> CentroidReader<'_, T> {
+        self.centroids.get_read_access()
     }
 }
 
@@ -466,7 +448,7 @@ impl<T> RemoteAssignment<T> {
 
 // Returns true if some points changed assignment, false otherwise
 // TODO share with the sequential code
-fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, all_neighbours: &Neighbours, shared_state: &SharedState<T>) -> bool {
+fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, all_neighbours: &Neighbours, centroid_reader: &CentroidReader<T>) -> bool {
     // 1. Extract the local points
     //    This must be the only non-empty section of the assignment
     let (this_thread, old_assignment) = curr_asg.extract_local_assignment();
@@ -487,7 +469,7 @@ fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, all_neighbour
         let prev_cluster_id = FullCentroidId::from(this_thread, partial_cid);
 
         // Start with the current centroid
-        let current_cluster = shared_state.get_centroid(prev_cluster_id);
+        let current_cluster = &centroid_reader[prev_cluster_id];
         let mut min_dist = current_cluster.center_point.dist(&x);
         let mut closest_idx = Some(prev_cluster_id);
 
@@ -507,7 +489,7 @@ fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, all_neighbour
                     break;
                 }
 
-                let t_centroid = shared_state.get_centroid(other_cluster.neigh_id);
+                let t_centroid = &centroid_reader[other_cluster.neigh_id];
                 let t_dist = t_centroid.center_point.dist(&x);
 
                 if t_dist < min_dist {
@@ -551,58 +533,69 @@ fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, all_neighbour
     return some_change;
 }
 
-/*************************/
-/* CentroidReader/Writer */
-/*************************/
-// TODO: explain
+/*****************/
+/* Centroid sync */
+/*****************/
 
-fn build_centroid_reader_writer_pair<T>(clusters: Vec<Centroid<T>>) -> (CentroidReader<T>, CentroidWriter<T>) {
-    let p = Arc::new(clusters);
-    let reader = CentroidReader {
-        p: Arc::clone(&p)
-    };
-    let writer = CentroidWriter {
-        p: p
-    };
-    return (reader, writer);
+/* RwCentroids */
+// First level is indexed by thread id
+// Second Vec level is indexed by PartialCentroidId
+struct RwCentroids<T> (Vec<RwLock<Vec<Centroid<T>>>>);
+
+impl<T> RwCentroids<T> {
+    fn new(centroids: Vec<Vec<Centroid<T>>>) -> Self {
+        RwCentroids (
+            centroids.into_iter()
+                    .map(|thread_data| RwLock::new(thread_data))
+                    .collect()
+        )
+    }
+
+    fn get_read_access(&self) -> CentroidReader<'_, T> {
+        let all_read_guards = self.0
+                                .iter()
+                                // Note: if one thread asks for read access, then all threads must be guaranteed
+                                // to be in a phase where they only read. Hence we don't need to lock
+                                .map(|lock| lock.try_read().unwrap())
+                                .collect::<Vec<_>>();
+        CentroidReader(all_read_guards)
+    }
+
+    fn get_write_access(&self, thread_id: ThreadId) -> CentroidWriter<'_, T> {
+        // By the same argument as above, we don't really need to lock for write accesses
+        self.0[thread_id]
+            .try_write()
+            .unwrap()
+    }
 }
 
 /* CentroidReader */
-struct CentroidReader<T> {
-    p: Arc<Vec<Centroid<T>>>
+struct CentroidReader<'a, T> (Vec<RwLockReadGuard<'a, Vec<Centroid<T>>>>);
+
+impl<'a, T> CentroidReader<'a, T> {
+    fn get(&self, cluster_id: FullCentroidId) -> Option<&Centroid<T>> {
+        self.0
+            .get(cluster_id.thread_id)
+            .and_then(|rv| rv.get(cluster_id.cluster_in_thread))
+    }
 }
 
-impl<T> CentroidReader<T> {
-    unsafe fn read(&self, cluster_id: PartialCentroidId) -> Option<&Centroid<T>> {
-        // Note: also take this as a pointer when reading to make sure that Rust
-        // doesn't make any assumptions about its content (e.g. caching)
-        let ptr = Arc::as_ptr(&self.p);
-        let data = ptr.as_ref().unwrap();
-        data.get(cluster_id)
+impl<'a, T> Index<FullClusterId> for CentroidReader<'a, T> {
+    type Output = Centroid<T>;
+
+    fn index(&self, cluster_id: FullClusterId) -> &Self::Output {
+        self.get(cluster_id).unwrap()
     }
 }
 
 /* CentroidWriter */
-struct CentroidWriter<T> {
-    p: Arc<Vec<Centroid<T>>>
-}
-
-impl<T> CentroidWriter<T> {
-    unsafe fn write(&mut self, cluster_id: PartialCentroidId, data: Centroid<T>) {
-        *self.get_mut(cluster_id).unwrap() = data;
-    }
-
-    unsafe fn get_mut(&mut self, cluster_id: PartialCentroidId) -> Option<&mut Centroid<T>> {
-        let ptr = Arc::as_ptr(&self.p).cast_mut();
-        let mut_data = ptr.as_mut().unwrap();
-        mut_data.get_mut(cluster_id)
-    }
-}
+type CentroidWriter<'a, T> = RwLockWriteGuard<'a, Vec<Centroid<T>>>;
 
 /************/
 /* Centroid */
 /************/
 
+// TODO refactor into parenthezised struct
 struct Centroid<T> {
     center_point: T
 }
@@ -656,16 +649,16 @@ impl Neighbours {
     }
 
     // Adapted from seq::compute_neighbours
-    fn update<T: Point>(&mut self, this_thread: ThreadId, shared_state: &SharedState<T>) {
+    fn update<T: Point>(&mut self, this_thread: ThreadId, centroid_reader: &CentroidReader<T>) {
         let mut sort_count = 0;
         // Go over all the local centroid neighbour lists
         for (partial_cid, neigh_list) in self.0.iter_mut().enumerate() {
             let local_cid = FullCentroidId::from(this_thread, partial_cid);
-            let local_centroid = shared_state.get_centroid(local_cid);
+            let local_centroid = &centroid_reader[local_cid];
 
             // Update the distance to each neighbour for this local centroid
             for neigh_info in neigh_list.iter_mut() {
-                let neigh_centroid = shared_state.get_centroid(neigh_info.neigh_id);
+                let neigh_centroid = &centroid_reader[neigh_info.neigh_id];
                 neigh_info.neigh_dist = local_centroid.center_point.dist(&neigh_centroid.center_point);
                 assert!(neigh_info.neigh_dist.is_finite());
             }
