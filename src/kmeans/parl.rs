@@ -144,7 +144,11 @@ impl<T> WorkerThread<T> {
     }
 
     fn send_remote_assignments(&mut self) {
-        for (dest, data) in self.my_assignment.extract_remote_assignments() {
+        for (dest, data) in self.my_assignment
+                                .extract_remote_assignments()
+                                .collect::<Vec<_>>()
+                                .into_iter()
+        {
             let message = Ok((self.thread_id, data));
             self.send_message(dest, message);
         }
@@ -152,7 +156,7 @@ impl<T> WorkerThread<T> {
     }
 
     fn notify_others_done_with_assign(&self) {
-        for channel in self.outwards {
+        for channel in self.outwards.iter() {
             let message = Err(self.thread_id); // means EOF
             channel.send(message).unwrap()
         }
@@ -174,7 +178,7 @@ impl<T> WorkerThread<T> {
         while !not_received.is_empty() {
             match self.inward.recv() {
                 Ok(Ok((sender_id, remote_assignment))) => {
-                    self.my_assignment.integrate_remote(sender_id, remote_assignment);
+                    self.my_assignment.integrate_remote(remote_assignment);
                     received_any_changes = true;
                 },
                 Ok(Err(thread_eof)) => {
@@ -202,7 +206,7 @@ impl<T> WorkerThread<T> {
 }
 
 impl<T: Point> WorkerThread<T> {
-    fn start(self, shared_state: Arc<SharedState<T>>) -> Self {
+    fn start(mut self, shared_state: Arc<SharedState<T>>) -> Self {
         let mut i_have_changes = true;
         while shared_state.consensus_continue(i_have_changes) {
             // Note: this is local only, not read by anyone else
@@ -300,7 +304,7 @@ impl<T> SharedState<T> {
 /* Point assignment */
 /********************/
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 struct FullClusterId {
     thread_id:         ThreadId,
     cluster_in_thread: PartialClusterId
@@ -375,9 +379,7 @@ impl<T> WorkerAssignment<T> {
             .enumerate()
     }
 
-    // FIXME why do we need to know who sent this data?
-    fn integrate_remote(&mut self, sender: ThreadId, remote_assignment: RemoteAssignment<T>) {
-        //self.thread_assignments[sender]
+    fn integrate_remote(&mut self, remote_assignment: RemoteAssignment<T>) {
         self.get_local_mut()
             .merge(remote_assignment)
     }
@@ -428,7 +430,7 @@ impl<T> RemoteAssignment<T> {
         std::mem::replace(self, new_empty)
     }
 
-    fn merge(&mut self, other: Self) {
+    fn merge(&mut self, mut other: Self) {
         assert_eq!(self.num_clusters(), other.num_clusters());
         self.0.iter_mut()
             .zip(other.0.iter_mut())
@@ -644,7 +646,7 @@ impl Neighbours {
             let src_id = FullCentroidId::from(this_thread, src_partial_id);
             let neighbour_ids = (0..nthreads)
                                     .flat_map(|dst_thread| (0..clusters_per_thread[dst_thread])
-                                                            .map(|dst_cluster_in_thread| FullCentroidId::from(dst_thread, dst_cluster_in_thread)))
+                                                            .map(move |dst_cluster_in_thread| FullCentroidId::from(dst_thread, dst_cluster_in_thread)))
                                     .filter(|dst_id| dst_id != &src_id);
             let neigh_list = neighbour_ids.map(|dst_id| NeighInfo { neigh_id: dst_id, neigh_dist: f64::INFINITY});
             all_neighbours.push(neigh_list.collect());
@@ -739,7 +741,7 @@ fn init_assignments<T, I>(points: &mut I, clusters_per_thread: &[usize]) -> Vec<
 
     for (i, j) in (0..nthreads)
                     .flat_map(|i| (0..clusters_per_thread[i])
-                                    .map(|j| (i, j)))
+                                    .map(move |j| (i, j)))
                     .cycle()
     {
         let x = points.next().unwrap();
