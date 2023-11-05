@@ -9,24 +9,11 @@ pub trait Point: Sized {
     fn mean(points: &[Self]) -> Self;
 }
 
-pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
-    where I: Iterator<Item = T>,
-        T: Point
-{
-    Clusters::Seq(seq::cluster(points, nclusters))
-}
+pub use seq::cluster as cluster_seq;
+pub use parl::cluster as cluster_parl;
 
-pub enum Clusters<T> {
-    Seq(seq::Clusters<T>)
-}
-
-impl<T> Clusters<T> {
-    pub fn into_iter(self) -> impl Iterator<Item=(T, Vec<T>)> {
-        match self {
-            Clusters::Seq(seq) => seq.into_iter(),
-        }
-    }
-}
+pub type SeqClusters<T> = seq::Clusters<T>;
+pub type ParlClusters<T> = parl::Clusters<T>;
 
 #[cfg(test)]
 mod test {

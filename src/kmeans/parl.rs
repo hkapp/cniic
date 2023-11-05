@@ -800,6 +800,17 @@ impl<T> Clusters<T> {
         }
     }
 
+    pub fn into_iter(self) -> impl Iterator<Item=(T, Vec<T>)> {
+        self.centroids
+            .into_iter()
+            .zip(self.clustered_data.into_iter())
+            .flat_map(|(centroids_in_thread, asgs_in_thread)|
+                centroids_in_thread.into_iter()
+                    .map(|c| c.0)
+                    .zip(asgs_in_thread.into_iter_clusters()
+                            .map(|(_id, data)| data)))
+    }
+
     fn iter(&self) -> impl Iterator<Item=(&T, &Vec<T>)> {
         self.centroids
             .iter()
