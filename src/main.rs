@@ -84,7 +84,7 @@ impl bench::Bench for Hufman {
 
 /* bench: Reduce colors via k-means */
 
-type RedColKM = kmeans::Clusters<Rgb<u8>>;
+type RedColKM = kmeans::ParlClusters<Rgb<u8>>;
 impl bench::Bench for RedColKM {
     fn encode<W: io::Write>(img: &bench::Img, writer: &mut W) -> io::Result<()> {
         let pixels_iter = || img.pixels().map(|(_x, _y, px)| px.to_rgb());
@@ -94,7 +94,7 @@ impl bench::Bench for RedColKM {
 
         let (w, h) = img.dimensions();
         let nclusters = w + h;
-        let clusters = kmeans::cluster(&mut distinct_colors.into_iter(), nclusters as usize);
+        let clusters = kmeans::cluster_parl(&mut distinct_colors.into_iter(), nclusters as usize);
 
         //println!("Resulting clusters:");
         //for i in 0..clusters.len() {
