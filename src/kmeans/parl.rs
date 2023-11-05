@@ -10,14 +10,7 @@ use std::sync::mpsc::{self, Sender, Receiver};
 /* K-Means algorithm */
 /*********************/
 
-#[derive(Debug)]
-pub struct Clusters<T> {
-    centroids:       Vec<T>,
-    assignment:      Vec<Vec<T>>,
-    neighbours:      Vec<Vec<(usize, f64)>>, // ordered
-}
-
-pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> impl Iterator<Item=Vec<T>>
+pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
     where I: Iterator<Item = T>,
         T: Point + Send + Sync + 'static
 {
@@ -65,18 +58,21 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> impl Iterator<Item=Vec
                 w.start(shr)));
     }
 
-    workers.into_iter()
-        // Wait for the thread to finish
-        .map(|w| w.join().unwrap())
-        // Extract the local assignment for that thread
-        .map(|mut final_thread_state| {
-            let (_, local_assignment) = final_thread_state.my_assignment.extract_local_assignment();
-            assert!(final_thread_state.my_assignment.is_empty());
-            local_assignment
-        })
-        // Merge the results into a single iterator
-        .flat_map(|asg| asg.into_iter_clusters()
-                            .map(|(_, points_in_cluster)| points_in_cluster))
+    #[cfg(test)]
+    {
+        thread::sleep(std::time::Duration::from_secs(1));
+        for w in workers.iter() {
+            assert!(w.is_finished());
+        }
+    }
+
+    let finished_workers = workers.into_iter()
+                            // Wait for the thread to finish
+                            .map(|w| w.join().unwrap())
+                            .collect::<Vec<_>>();
+    let shared_state = Arc::into_inner(shared_state).unwrap();
+
+    Clusters::from(finished_workers, shared_state)
 }
 
 // Returns how many clusters for each thread, as evenly distributed as possible
@@ -144,7 +140,11 @@ impl<T> WorkerThread<T> {
     }
 
     fn notify_others_done_with_assign(&self) {
-        for channel in self.outwards.iter() {
+        for (_channel_id, channel) in self.outwards
+                            .iter()
+                            .enumerate()
+                            .filter(|(other_id, _)| *other_id != self.thread_id)
+        {
             let message = Err(self.thread_id); // means EOF
             channel.send(message).unwrap()
         }
@@ -171,7 +171,7 @@ impl<T> WorkerThread<T> {
                 },
                 Ok(Err(thread_eof)) => {
                     let was_there = not_received.remove(&thread_eof);
-                    assert!(was_there, "{}", thread_eof);
+                    assert!(was_there, "Thread {} received EOF from thread {} twice", self.thread_id, thread_eof);
                 }
                 Err(_) => {
                     /* From https://doc.rust-lang.org/std/sync/mpsc/struct.RecvError.html:
@@ -258,6 +258,7 @@ impl<T> SharedState<T> {
 
     // If any thread has changes, this returns true
     fn consensus_continue(&self, i_have_changes: bool) -> bool {
+        println!("consensus_continue: calling thread {} changes", if i_have_changes { "has" } else { "does not have" });
         if i_have_changes {
             self.anyone_has_changes.store(true, ATOMIC_ORDERING);
         }
@@ -567,6 +568,13 @@ impl<T> RwCentroids<T> {
             .try_write()
             .unwrap()
     }
+
+    fn into_inner(self) -> Vec<Vec<Centroid<T>>> {
+        self.0
+            .into_iter()
+            .map(|lock| lock.into_inner().unwrap())
+            .collect()
+    }
 }
 
 /* CentroidReader */
@@ -730,15 +738,15 @@ fn init_assignments<T, I>(points: &mut I, clusters_per_thread: &[usize]) -> Vec<
 
     let mut init_assignment: Vec<RemoteAssignment<T>> = (0..nthreads).map(|i| RemoteAssignment::new(clusters_per_thread[i])).collect();
 
-    for (i, j) in (0..nthreads)
-                    .flat_map(|i| (0..clusters_per_thread[i])
-                                    .map(move |j| (i, j)))
-                    .cycle()
-    {
-        let x = points.next().unwrap();
+    let mut assignee = (0..nthreads)
+                        .flat_map(|i| (0..clusters_per_thread[i])
+                                        .map(move |j| (i, j)))
+                        .cycle();
+
+    for x in points {
+        let (i, j) = assignee.next().unwrap();
         init_assignment[i].assign(j, x);
     }
-    assert!(points.next().is_none());
 
     return init_assignment;
 }
@@ -763,62 +771,76 @@ fn update_centroids<T: Point>(clusters: &mut Clusters<T>) {
     compute_centroids(&clusters.assignment, &mut clusters.centroids);
 }*/
 
+/***************************/
 /* Public API for Clusters */
+/***************************/
+
+pub struct Clusters<T> {
+    clustered_data: Vec<RemoteAssignment<T>>,
+    centroids:      Vec<Vec<Centroid<T>>>,
+}
 
 impl<T> Clusters<T> {
-    // Note: we don't implement the IntoIterator trait because we'd need
-    //       to define our own iterator type
-    pub fn into_iter(self) -> impl Iterator<Item=(T, Vec<T>)> {
+    fn from(finished_workers: Vec<WorkerThread<T>>, shared_state: SharedState<T>) -> Self {
+        Clusters {
+            clustered_data: finished_workers.into_iter()
+                                .map(|mut w| w.my_assignment.extract_local_assignment().1)
+                                .collect(),
+            centroids: shared_state.centroids.into_inner(),
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item=(&T, &Vec<T>)> {
         self.centroids
-            .into_iter()
-            .zip(self.assignment
-                    .into_iter())
+            .iter()
+            .zip(self.clustered_data.iter())
+            .flat_map(|(centroids_in_thread, asgs_in_thread)|
+                centroids_in_thread.iter()
+                    .map(|c| &c.0)
+                    .zip(asgs_in_thread.iter_clusters()
+                            .map(|(_id, data)| data)))
     }
 
-    fn len(&self) -> usize {
-        assert_eq!(self.centroids.len(), self.assignment.len());
-        self.centroids.len()
+    fn num_centroids(&self) -> usize {
+        self.centroids
+            .iter()
+            .map(|v| v.len())
+            .sum()
     }
 
-    fn certainty_radius(&self, cid: usize) -> f64 {
-        self.neighbours[cid].get(0).map(|x| x.1).unwrap_or(0.0) / 2.0
+    fn centroids(&self) -> impl Iterator<Item=&T> {
+        self.centroids
+            .iter()
+            .flat_map(|v| v.iter()
+                            .map(|c| &c.0))
+    }
+
+    fn clustered_data(&self) -> impl Iterator<Item=&Vec<T>> {
+        self.clustered_data
+            .iter()
+            .flat_map(|asgs_in_thread|
+                asgs_in_thread.iter_clusters()
+                            .map(|(_id, data)| data))
     }
 }
 
+
+/**************/
 /* Unit tests */
+/**************/
 
 #[cfg(test)]
 mod test {
     use super::*;
+    use super::super::test::square_centered_at;
     use std::collections::HashSet;
-
-    impl Point for (i32, i32) {
-        fn dist(&self, other: &Self) -> f64 {
-            fn diff_squared(a: i32, b: i32) -> f64 {
-                ((a - b) as f64).powi(2)
-            }
-
-            (diff_squared(self.0, other.0) + diff_squared(self.1, other.1)).sqrt()
-        }
-
-        fn mean(points: &[Self]) -> Self {
-            let sum = points.iter()
-                        .map(|(a, b)| (*a as i64, *b as i64))
-                        .fold((0, 0), |(r, u), (a, b)| (r + a, u + b));
-
-            let div = |x: i64| -> i32 {
-                (x / points.len() as i64) as i32
-            };
-            (div(sum.0), div(sum.1))
-        }
-    }
 
     fn assert_centroids<T>(clusters: &Clusters<T>, expected_centroids: &[T])
         where T: Clone + Eq + std::hash::Hash + std::fmt::Debug
     {
-        assert_eq!(clusters.centroids.len(), expected_centroids.len());
+        assert_eq!(clusters.num_centroids(), expected_centroids.len());
 
-        let centroids = HashSet::<_>::from_iter(clusters.centroids.iter().clone());
+        let centroids = HashSet::<_>::from_iter(clusters.centroids().cloned());
         println!("Set of centroids: {:?}", centroids);
         for ex in expected_centroids {
             assert!(centroids.contains(ex), "Not present: {:?}", &ex);
@@ -831,23 +853,9 @@ mod test {
         let clusters = super::cluster(&mut data.into_iter(), data.len());
         assert_centroids(&clusters, &data[..]);
 
-        for i in 0..data.len() {
-            assert_eq!(clusters.assignment[i], vec![clusters.centroids[i]]);
+        for (centroid, data_in_cluster) in clusters.iter() {
+            assert_eq!(data_in_cluster, std::slice::from_ref(centroid));
         }
-    }
-
-    /* . . .         * * *
-     * . * .    =>   * * *
-     * . . .         * * *
-     */
-    fn square_centered_at(p: (i32, i32)) -> Vec<(i32, i32)> {
-        let mut square = Vec::new();
-        for i in -1..2 {
-            for j in -1..2 {
-                square.push((p.0 + i, p.1 + j));
-            }
-        }
-        square
     }
 
     #[test]
@@ -857,7 +865,10 @@ mod test {
         println!("{:?}", &data);
         let clusters = super::cluster(&mut data.into_iter(), 1);
         assert_centroids(&clusters, &[(0, 0)][..]);
-        assert_eq!(clusters.assignment[0].len(), ndata);
+
+        let mut it = clusters.clustered_data();
+        assert_eq!(it.next().map(|asg| asg.len()), Some(ndata));
+        assert_eq!(it.next(), None);
     }
 
     #[test]
@@ -873,40 +884,15 @@ mod test {
         println!("{:?}", &data);
 
         let clusters = super::cluster(&mut data.into_iter(), 2);
-        println!("{:?}", &clusters);
         assert_centroids(&clusters, &sq_centers[..]);
     }
 
-    #[test]
-    fn dist1() {
-        assert_eq!((0, 0).dist(&(0, 1)), 1.0);
-    }
-
-    #[test]
-    fn dist2() {
-        let sq_center = (-100, 0);
-        let correct_centroid = (-11, 0);
-        let wrong_centroid = (11, 0);
-
-        for p in square_centered_at(sq_center) {
-            let closer = correct_centroid.dist(&p);
-            let further = wrong_centroid.dist(&p);
-            assert!(closer < further);
-        }
-    }
-
-    #[test]
-    fn mean1() {
-        let sq_center = (-100, 0);
-        assert_eq!(Point::mean(&square_centered_at(sq_center)), sq_center);
-    }
-
-    #[test]
+    /*#[test]
     fn radii() {
         let data = [(0, 0), (1, 0)];
         let clusters = super::cluster(&mut data.into_iter(), data.len());
         // Note: the certainty radius is half the distance to the closest centroid
         assert_eq!(clusters.certainty_radius(0), 0.5);
         assert_eq!(clusters.certainty_radius(1), 0.5);
-    }
+    }*/
 }
