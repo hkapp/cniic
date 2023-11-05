@@ -195,15 +195,21 @@ impl<T> WorkerThread<T> {
 
 impl<T: Point> WorkerThread<T> {
     fn start(mut self, shared_state: Arc<SharedState<T>>) -> Self {
+        println!("T({}): start", self.thread_id);
         let mut i_have_changes = true;
         while shared_state.consensus_continue(i_have_changes) {
             // Note: this is local only, not read by anyone else
+            println!("T({}): updating neighbours...", self.thread_id);
             self.update_centroid_neighbours(&shared_state.centroid_reader());
+            println!("T({}): assigning points...", self.thread_id);
             let local_changes = self.assign_points_to_clusters(&shared_state);
+            println!("T({}): sending remote assignments...", self.thread_id);
             self.send_remote_assignments();
             // This effectively acts like a sync barrier
+            println!("T({}): receiving remote assignments...", self.thread_id);
             let remote_changes = self.receive_remote_assignments(shared_state.nthreads);
             i_have_changes = local_changes || remote_changes;
+            println!("T({}): computing centroids...", self.thread_id);
             self.compute_centroids(&shared_state);
             // Note: the while-loop condition performs sync after this step
         }
@@ -264,14 +270,18 @@ impl<T> SharedState<T> {
         }
 
         // Wait for every thread to get to this point
-        let barrier_result = self.barrier.wait();
+        self.barrier.wait();
 
         let should_continue = self.anyone_has_changes.load(ATOMIC_ORDERING);
-        if should_continue && barrier_result.is_leader() {
-            // Reset the "has_any_changes" for the next round
-            // We only need one thread to do that, hence the use of "is_leader()"
-            // WARNING: technically the leader thread could starve until another thread gets back
-            // to this consensus function
+
+        // Make sure that every thread has read the value
+        self.barrier.wait();
+
+        if should_continue {
+            // Reset the shared variable
+            // Note: every thread does it when only one would need to.
+            // Though technically if only one thread updates it, other thread could
+            // get to call consensus_continue() before it's done writing
             self.anyone_has_changes.store(false, ATOMIC_ORDERING)
         }
 
