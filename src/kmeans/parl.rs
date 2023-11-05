@@ -470,7 +470,7 @@ fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, all_neighbour
 
         // Start with the current centroid
         let current_cluster = &centroid_reader[prev_cluster_id];
-        let mut min_dist = current_cluster.center_point.dist(&x);
+        let mut min_dist = current_cluster.0.dist(&x);
         let mut closest_idx = Some(prev_cluster_id);
 
         // Check if we can early stop
@@ -490,7 +490,7 @@ fn assign_points_seq<T: Point>(curr_asg: &mut WorkerAssignment<T>, all_neighbour
                 }
 
                 let t_centroid = &centroid_reader[other_cluster.neigh_id];
-                let t_dist = t_centroid.center_point.dist(&x);
+                let t_dist = t_centroid.0.dist(&x);
 
                 if t_dist < min_dist {
                     min_dist = t_dist;
@@ -595,22 +595,20 @@ type CentroidWriter<'a, T> = RwLockWriteGuard<'a, Vec<Centroid<T>>>;
 /* Centroid */
 /************/
 
-// TODO refactor into parenthezised struct
-struct Centroid<T> {
-    center_point: T
-}
+// Just a marker struct for readability
+struct Centroid<T>(T);
 
 impl<T: Point> Centroid<T> {
     // This is basically seq::compute_centroids()
     fn from(points: &[T]) -> Self {
-        Centroid {
-            center_point: T::mean(points)
-        }
+        Centroid (
+            T::mean(points)
+        )
     }
 
     // This is basically seq::compute_centroids()
     fn update_center(&mut self, points: &[T]) {
-        self.center_point = T::mean(points);
+        self.0 = T::mean(points);
     }
 }
 
@@ -659,7 +657,7 @@ impl Neighbours {
             // Update the distance to each neighbour for this local centroid
             for neigh_info in neigh_list.iter_mut() {
                 let neigh_centroid = &centroid_reader[neigh_info.neigh_id];
-                neigh_info.neigh_dist = local_centroid.center_point.dist(&neigh_centroid.center_point);
+                neigh_info.neigh_dist = local_centroid.0.dist(&neigh_centroid.0);
                 assert!(neigh_info.neigh_dist.is_finite());
             }
 
