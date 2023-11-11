@@ -15,7 +15,7 @@ pub trait Bench {
 
 pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
     where I: Iterator<Item = P>,
-        P: AsRef<Path>,
+        P: AsRef<Path> + Debug,
         T: Bench
 {
     let mut wrote_header = false;
@@ -23,6 +23,7 @@ pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
 
     paths
         .map(|p| {
+            println!("Processing {:?}...", p);
             let img = image::open(p.as_ref())
                         .map_err(|e| format!("{:?}", e))?;
 

@@ -33,16 +33,8 @@ impl bench::Bench for Hufman {
 
         // Now write the data
         let mut bw = bit::IoBitWriter::new(writer, huf::BIT_ORDER);
-        let mut px_counter = 0;
         for px in pixels_iter() {
-            if px_counter == 296 {
-                println!("Px input: {:?}", &px);
-            }
-            else {
-                //panic!("That should be enough");
-            }
             enc.encode(&px, &mut bw);
-            px_counter += 1;
         }
         bw.pad_and_flush()?;
         bw.into_inner().flush()?;
@@ -52,8 +44,6 @@ impl bench::Bench for Hufman {
 
     fn decode<I: Iterator<Item = u8>>(reader: &mut I) -> Option<bench::Img> {
         use ser::Deserialize;
-
-        println!("Start decoding...");
 
         // Start by reading the decoder
         let dec: huf::Dec<image::Rgb<u8>> = Deserialize::deserialize(reader)?;
