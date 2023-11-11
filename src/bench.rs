@@ -1,9 +1,11 @@
 use std::fs;
 use std::io;
 use std::fmt::Debug;
-use std::path::Path;
+use std::path::PathBuf;
 use image::GenericImageView;
 use bytesize::ByteSize;
+use rayon::prelude::*;
+use std::sync::RwLock;
 
 pub type Img = image::DynamicImage;
 
@@ -15,16 +17,20 @@ pub trait Bench {
 
 pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
     where I: Iterator<Item = P>,
-        P: AsRef<Path> + Debug,
+        P: Into<PathBuf>,
         T: Bench
 {
-    let mut wrote_header = false;
-    let mut csv = csv_writer::<T>()?;
+    let wrote_header = false;
+    let csv = csv_writer::<T>()?;
+    let writer_state = RwLock::new((wrote_header, csv));
 
     paths
+        .map(|p| p.into())
+        .collect::<Vec<PathBuf>>()
+        .into_par_iter()
         .map(|p| {
             println!("Processing {:?}...", p);
-            let img = image::open(p.as_ref())
+            let img = image::open(&p)
                         .map_err(|e| format!("{:?}", e))?;
 
             let mut data = Vec::new();
@@ -58,19 +64,26 @@ pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
                 }
             }
 
-            if !wrote_header {
+            use std::ops::DerefMut;
+            let mut lock_guard = writer_state.write().unwrap();
+            let lock_guard = lock_guard.deref_mut();
+            let wrote_header: &mut bool = &mut lock_guard.0;
+            let csv: &mut _ = &mut lock_guard.1;
+
+            if !*wrote_header {
                 csv.write_record(&["name", "compressed_size", "compression_ratio"])
                     .map_err(|e| format!("{:?}", e))?;
-                wrote_header = true;
+                *wrote_header = true;
             }
 
-            let file_name = p.as_ref().to_str().unwrap_or("???");
+            let file_name = p.to_str().unwrap_or("???");
             csv.serialize((file_name, compressed_size, compression_ratio * 100.0))
                 .map_err(|e| format!("{:?}", e))?;
             Ok(())
         })
         .for_each(|r| print_err(r));
 
+    let (_wrote_header, mut csv) = writer_state.into_inner().unwrap();
     csv.flush()?;
     Ok(())
 }
