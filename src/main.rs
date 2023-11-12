@@ -90,11 +90,12 @@ impl bench::Bench for RedColKM {
         let pixels_iter = || img.pixels().map(|(_x, _y, px)| px.to_rgb());
 
         // For now: only cluster the unique color. Don't take their frequency into account
-        let distinct_colors = HashSet::<_>::from_iter(pixels_iter());
+        let colors_set = HashSet::<_>::from_iter(pixels_iter());
+        let distinct_colors = Vec::from_iter(colors_set.into_iter());
 
         let (w, h) = img.dimensions();
         let nclusters = w + h;
-        let clusters = kmeans::cluster(&mut distinct_colors.into_iter(), nclusters as usize);
+        let clusters = kmeans::cluster(distinct_colors, nclusters as usize);
 
         //println!("Resulting clusters:");
         //for i in 0..clusters.len() {
@@ -155,7 +156,7 @@ impl kmeans::Point for Rgb<u8> {
         (f(0) + f(1) + f(2)).sqrt()
     }
 
-    fn mean(points: &[Self]) -> Self {
+    fn mean(points: &[Self]) -> Option<Self> {
         fn vector_add(mut x: [u64; 3], y: &Rgb<u8>) -> [u64; 3] {
             for i in 0..3 {
                 x[i] += y.0[i] as u64;
@@ -164,14 +165,16 @@ impl kmeans::Point for Rgb<u8> {
         }
 
         if points.len() == 0 {
-            return Rgb(Default::default());
+            return None;
         }
 
         let sum_vector = points.iter()
                             .fold([0, 0, 0], vector_add);
 
-        Rgb (
-            sum_vector.map(|x| (x / points.len() as u64) as u8)
+        Some(
+            Rgb (
+                sum_vector.map(|x| (x / points.len() as u64) as u8)
+            )
         )
     }
 }
@@ -186,7 +189,7 @@ mod tests {
         let p1 = Rgb([0, 0, 0]);
         let p2 = Rgb([2, 2, 2]);
         let expected = Rgb([1, 1, 1]);
-        assert_eq!(Point::mean(&[p1, p2][..]), expected);
+        assert_eq!(Point::mean(&[p1, p2][..]), Some(expected));
     }
 
     #[test]
