@@ -1,8 +1,8 @@
 pub trait Point: Sized {
     fn dist(&self, other: &Self) -> f64;
 
-    // TODO have this return Option, s.t. it can return None when the input is empty
-    fn mean(points: &[Self]) -> Self;
+    // This must return None if the given slice is empty
+    fn mean(points: &[Self]) -> Option<Self>;
 }
 
 #[derive(Debug)]
@@ -14,10 +14,7 @@ pub struct Clusters<T> {
 
 /* K-Means algorithm */
 
-pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
-    where I: Iterator<Item = T>,
-        T: Point
-{
+pub fn cluster<T: Point>(points: Vec<T>, nclusters: usize) -> Clusters<T> {
     let mut clusters = init(points, nclusters);
     let mut changed_assignment = true;
 
@@ -31,33 +28,47 @@ pub fn cluster<I, T>(points: &mut I, nclusters: usize) -> Clusters<T>
     }
     println!("#iterations: {}", i);
 
+    // Sanity check
+    check_enough_active_clusters(&clusters, nclusters);
+
     return clusters;
+}
+
+fn check_enough_active_clusters<T>(clusters: &Clusters<T>, requested_nclusters: usize) {
+    let point_count = clusters.assignment
+                            .iter()
+                            .map(|v| v.len())
+                            .sum();
+    // We allow for 1% drift from the value requested by the client
+    let min_cluster_count = std::cmp::min(point_count, (0.99 * requested_nclusters as f64) as usize);
+
+    let active_cluster_count = clusters.assignment
+                                    .iter()
+                                    .filter(|v| v.len() > 0)
+                                    .count();
+
+    assert!(active_cluster_count >= min_cluster_count,
+        "Not enough active clusters\nRequested {}, got {} (min allowed: {})",
+        requested_nclusters, active_cluster_count, min_cluster_count);
 }
 
 type Assignment<T> = Vec<Vec<T>>;
 
-// Consider requiring ExactSizeIterator
-fn init_assignment<T, I>(points: &mut I, nclusters: usize) -> Assignment<T>
-    where I: Iterator<Item = T>,
-        T: Point
-{
-    let mut init_assignment = Vec::with_capacity(nclusters);
-    for _ in 0..nclusters {
-        init_assignment.push(Vec::new());
+fn init_assignment<T: Point>(mut points: Vec<T>, nclusters: usize) -> Assignment<T> {
+    // Note: we could actually implement the same mechanism if the input is an iterator
+    /* Each cluster gets one point
+     * The last one gets all the remaining points
+     */
+    let mut init_assignment = Vec::new();
+    for _ in 0..(nclusters-1) {
+        init_assignment.push(points.pop().into_iter().collect());
     }
-
-    for (i, x) in points.enumerate() {
-        let vec = init_assignment.get_mut(i % nclusters).unwrap();
-        vec.push(x);
-    }
+    init_assignment.push(points);
 
     return init_assignment;
 }
 
-fn init<T, I>(points: &mut I, nclusters: usize) -> Clusters<T>
-    where I: Iterator<Item = T>,
-        T: Point
-{
+fn init<T: Point>(points: Vec<T>, nclusters: usize) -> Clusters<T> {
     let assignment = init_assignment(points, nclusters);
     let centroids  = init_centroids(&assignment);
     let neighbours = init_neighbours(&centroids);
@@ -80,7 +91,8 @@ fn init_centroids<T: Point>(assignment: &Assignment<T>) -> Vec<T> {
 
 fn compute_centroids<T: Point>(assignment: &Assignment<T>, centroids: &mut Vec<T>) {
     for points_in_cluster in assignment.iter() {
-        centroids.push(T::mean(&points_in_cluster));
+        // FIXME need to cover the case when the cluster has no data
+        centroids.push(T::mean(&points_in_cluster).unwrap());
     }
 }
 
@@ -145,8 +157,6 @@ fn update_neighbours<T: Point>(clusters: &mut Clusters<T>) {
 
 // Returns true if some points changed assignment, false otherwise
 fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
-    // This is the dummiest method: full join
-
     // 1. Extract all the vectors of points
     let new_assignment = (0..clusters.len()).map(|_| Vec::new()).collect();
     let old_assignment = std::mem::replace(&mut clusters.assignment, new_assignment);
@@ -157,6 +167,8 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
     let mut neighbour_cutoff_count = 0;
     let mut moved_count = 0;
     let mut stayed_count = 0;
+    let mut max_tested_neighbours = vec![0; old_assignment.len()];
+    let mut sum_tested_neighbours = 0;
     for (cci, x) in old_assignment.into_iter()
                             .enumerate()
                             .flat_map(|(i, v)| v.into_iter()
@@ -176,8 +188,11 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
             // TODO: explain this
             let cluster_cutoff = 2.0 * min_dist;
 
+            let mut tested_neighbours = 0;
             // Go over the neighbouring centroids in distance order
             for (tsi, c_to_c_dist) in clusters.neighbours[cci].iter() {
+                tested_neighbours += 1;
+
                 if *c_to_c_dist > cluster_cutoff {
                     neighbour_cutoff_count += 1;
                     break;
@@ -204,6 +219,8 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
                     break;
                 }*/
             }
+            max_tested_neighbours[cci] = std::cmp::max(max_tested_neighbours[cci], tested_neighbours);
+            sum_tested_neighbours += tested_neighbours;
         }
 
         let j = closest_idx.unwrap();
@@ -223,6 +240,14 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
     println!("Because of");
     println!("..certainty radius of its previous centroid: {}", obvious_stay_count);
     println!("..neighbour cutoff: {}", neighbour_cutoff_count);
+    println!("Global max tested neighbours: {}", max_tested_neighbours.iter().max().unwrap());
+    println!("Min of max tested neighbours: {}", max_tested_neighbours.iter().min().unwrap());
+    //println!("{:?}", max_tested_neighbours);
+    //println!("{:?}", clusters.centroids);
+    let tot_points = moved_count + stayed_count - obvious_stay_count;
+    if tot_points != 0 {
+        println!("Average tested neighbours: {}", sum_tested_neighbours / (moved_count + stayed_count - obvious_stay_count));
+    }
 
     return some_change;
 }
@@ -265,7 +290,11 @@ mod test {
             (diff_squared(self.0, other.0) + diff_squared(self.1, other.1)).sqrt()
         }
 
-        fn mean(points: &[Self]) -> Self {
+        fn mean(points: &[Self]) -> Option<Self> {
+            if points.len() == 0 {
+                return None;
+            }
+
             let sum = points.iter()
                         .map(|(a, b)| (*a as i64, *b as i64))
                         .fold((0, 0), |(r, u), (a, b)| (r + a, u + b));
@@ -273,7 +302,8 @@ mod test {
             let div = |x: i64| -> i32 {
                 (x / points.len() as i64) as i32
             };
-            (div(sum.0), div(sum.1))
+            let res = (div(sum.0), div(sum.1));
+            Some(res)
         }
     }
 
@@ -291,8 +321,8 @@ mod test {
 
     #[test]
     fn all_clusters() {
-        let data = [(0, 0), (1, 1)];
-        let clusters = super::cluster(&mut data.into_iter(), data.len());
+        let data = vec![(0, 0), (1, 1)];
+        let clusters = super::cluster(data.clone(), data.len());
         assert_centroids(&clusters, &data[..]);
 
         for i in 0..data.len() {
@@ -317,11 +347,10 @@ mod test {
     #[test]
     fn square1() {
         let data = square_centered_at((0, 0));
-        let ndata = data.len();
         println!("{:?}", &data);
-        let clusters = super::cluster(&mut data.into_iter(), 1);
+        let clusters = super::cluster(data.clone(), 1);
         assert_centroids(&clusters, &[(0, 0)][..]);
-        assert_eq!(clusters.assignment[0].len(), ndata);
+        assert_eq!(clusters.assignment[0].len(), data.len());
     }
 
     #[test]
@@ -336,7 +365,7 @@ mod test {
                     .unwrap();
         println!("{:?}", &data);
 
-        let clusters = super::cluster(&mut data.into_iter(), 2);
+        let clusters = super::cluster(data, 2);
         println!("{:?}", &clusters);
         assert_centroids(&clusters, &sq_centers[..]);
     }
@@ -362,15 +391,23 @@ mod test {
     #[test]
     fn mean1() {
         let sq_center = (-100, 0);
-        assert_eq!(Point::mean(&square_centered_at(sq_center)), sq_center);
+        assert_eq!(Point::mean(&square_centered_at(sq_center)), Some(sq_center));
     }
 
     #[test]
     fn radii() {
-        let data = [(0, 0), (1, 0)];
-        let clusters = super::cluster(&mut data.into_iter(), data.len());
+        let data = vec![(0, 0), (1, 0)];
+        let nclusters = data.len();
+        let clusters = super::cluster(data, nclusters);
         // Note: the certainty radius is half the distance to the closest centroid
         assert_eq!(clusters.certainty_radius(0), 0.5);
         assert_eq!(clusters.certainty_radius(1), 0.5);
+    }
+
+    #[test]
+    fn proper_init_asg() {
+        let data = vec![(1000, 0), (1000, 1), (-1000, 0), (-1000, 1)];
+        let clusters = super::cluster(data, 3);
+        // Note: the above should fail an assertion in the tested bug
     }
 }
