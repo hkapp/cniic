@@ -172,8 +172,8 @@ impl NeighbouringCentroids {
     fn resize(&mut self, nclusters: usize) -> bool {
         let max_possible_neighbours = nclusters - 1;
         let upper_bound = max_possible_neighbours;
-        let lower_bound = nclusters.ilog2() as usize + 1;  // add 1 to simulate rounding up
-        //let lower_bound = (nclusters as f32).sqrt() as usize;
+        //let lower_bound = nclusters.ilog2() as usize + 1;  // add 1 to simulate rounding up
+        let lower_bound = (nclusters as f32).sqrt() as usize;
 
         let dyn_val = 2 * self.watermark.get();
         let new_num_neighbours = min(
