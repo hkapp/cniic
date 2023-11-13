@@ -1,3 +1,6 @@
+use std::cell::Cell;
+use std::cmp::{min, max};
+
 pub trait Point: Sized {
     fn dist(&self, other: &Self) -> f64;
 
@@ -5,14 +8,15 @@ pub trait Point: Sized {
     fn mean(points: &[Self]) -> Option<Self>;
 }
 
-#[derive(Debug)]
 pub struct Clusters<T> {
     centroids:       Vec<T>,
     assignment:      Vec<Vec<T>>,
-    neighbours:      Vec<Vec<(usize, f64)>>, // ordered
+    neighbours:      NeighbourGraph,
 }
 
+/*********************/
 /* K-Means algorithm */
+/*********************/
 
 pub fn cluster<T: Point>(points: Vec<T>, nclusters: usize) -> Clusters<T> {
     let mut clusters = init(points, nclusters);
@@ -80,7 +84,9 @@ fn init<T: Point>(points: Vec<T>, nclusters: usize) -> Clusters<T> {
     }
 }
 
+/*************/
 /* centroids */
+/*************/
 
 fn init_centroids<T: Point>(assignment: &Assignment<T>) -> Vec<T> {
     let nclusters = assignment.len();
@@ -102,34 +108,41 @@ fn update_centroids<T: Point>(clusters: &mut Clusters<T>) {
     compute_centroids(&clusters.assignment, &mut clusters.centroids);
 }
 
+/**************/
 /* neighbours */
+/**************/
 
-type Neighbours = Vec<Vec<(usize, f64)>>;
-
-fn init_neighbours<T: Point>(centroids: &[T]) -> Neighbours {
-    let nclusters = centroids.len();
-    let mut neighbours = (0..nclusters)  // for each clusters
-                            .map(|i|
-                                (0..nclusters)  // generate neighbours
-                                .filter(|j| *j != i)  // can't be self
-                                .map(|j| (j, 0.0))
-                                .collect())
-                            .collect();
-    compute_neighbours(&centroids, &mut neighbours);
-    return neighbours;
+// The neighbours of a single centroid
+struct NeighbouringCentroids {
+    watermark:  Cell<usize>,
+    neighbours: Vec<(CentroidId, f64)>, // ordered by distance
 }
 
-// Optimization: keep the array in the previous order
-// There are good chances that the array is already sorted in this case
-fn compute_neighbours<T: Point>(centroids: &[T], neighbours: &mut Neighbours) {
-    let mut sort_count = 0;
-    for (i, c) in centroids.iter().enumerate() {
-        for neigh in neighbours[i].iter_mut() {
-            neigh.1 = c.dist(&centroids[neigh.0]);
+impl NeighbouringCentroids {
+    fn new(src: CentroidId, nclusters: usize) -> Self {
+        let neighbours = (0..nclusters)  // generate neighbours
+                            .filter(|dst| *dst != src)  // can't be self
+                            .map(|dst| (dst, 0.0))
+                            .collect::<Vec<_>>();
+
+        let init_watermark = neighbours.len(); // this value is important for init_neighbours
+
+        NeighbouringCentroids {
+            neighbours: neighbours,
+            watermark:  Cell::new(init_watermark),
+        }
+    }
+
+    fn update_distances<T: Point>(&mut self, src: &T, all_centroids: &[T]) {
+        for neigh in self.neighbours.iter_mut() {
+            let dst = &all_centroids[neigh.0];
+            neigh.1 = src.dist(dst);
             assert!(neigh.1.is_finite());
         }
+    }
 
-        let already_sorted = neighbours[i]
+    fn sort(&mut self) {
+        /*let already_sorted = self.neighbours
                                 .windows(2)
                                 // Optimization: consider it "good enough" if the first sqrt(nclusters) are sorted
                                 // This leads to imprecision. Though when we get to the point where the first sqrt(nclusters)
@@ -138,14 +151,97 @@ fn compute_neighbours<T: Point>(centroids: &[T], neighbours: &mut Neighbours) {
                                 .find(|xs| xs[0].1 > xs[1].1)
                                 .is_none();
         //let already_sorted=false;
-        if !already_sorted {
-            sort_count += 1;
+        if !already_sorted {*/
             // Optimization: use unstable sorting
             // We don't care about the stability of the ordering, we're interested in speed
-            neighbours[i].sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).ok_or_else(|| format!("{} <> {}", a, b)).unwrap());
+            self.neighbours.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).ok_or_else(|| format!("{} <> {}", a, b)).unwrap());
+        //}
+    }
+
+    fn shrink(&mut self, nclusters: usize) {
+        let upper_bound = nclusters - 1;  // max possible num neighbours
+        let lower_bound = nclusters.ilog2() as usize + 1;  // add 1 to simulate rounding up
+        let dyn_val = 2 * self.watermark.get();
+        let new_num_neighbours = min(
+                                    max(
+                                        dyn_val,
+                                        lower_bound),
+                                    upper_bound);
+
+        // Just do some logging, out of curiosity
+        if dyn_val < lower_bound {
+            println!("NeighbouringCentroids::shrink: lower bound triggered");
+            println!("                               dyn_val = {} < {} = lower_bound", dyn_val, lower_bound);
+        }
+
+        // TODO need to cover the case where the watermark value requires getting more neighbours
+        assert!(new_num_neighbours <= self.neighbours.len());
+
+        self.neighbours.truncate(new_num_neighbours);
+
+        // Reset the watermark
+        self.watermark.replace(0);
+    }
+
+    fn iter_and_record(&self) -> IterAndRecord {
+        IterAndRecord {
+            neigh_list: self,
+            next_pos:  0
         }
     }
-    println!("Sorted {} times", sort_count);
+
+    fn certainty_radius(&self) -> f64 {
+        self.neighbours.get(0).map(|x| x.1 / 2.0).unwrap_or(f64::INFINITY)
+    }
+}
+
+struct IterAndRecord<'a> {
+    neigh_list: &'a NeighbouringCentroids,
+    next_pos:   usize,
+}
+
+impl<'a> Iterator for IterAndRecord<'a> {
+    type Item = &'a (CentroidId, f64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = self.neigh_list.neighbours.get(self.next_pos);
+        self.next_pos += 1;
+        value
+    }
+}
+
+impl<'a> Drop for IterAndRecord<'a> {
+    fn drop(&mut self) {
+        self.neigh_list.watermark.replace(self.next_pos - 1);
+    }
+}
+
+type CentroidId = usize;
+// All the neighbours, taken together, form a graph
+// For correctness sake, we better hope that this graph is connected
+type NeighbourGraph = Vec<NeighbouringCentroids>;
+
+fn init_neighbours<T: Point>(centroids: &[T]) -> NeighbourGraph {
+    let nclusters = centroids.len();
+    let mut neighbours = (0..nclusters)  // for each clusters
+                            .map(|i| NeighbouringCentroids::new(i, nclusters))
+                            .collect();
+    compute_neighbours(&centroids, &mut neighbours);
+    return neighbours;
+}
+
+// Optimization: keep the array in the previous order
+// There are good chances that the array is already sorted in this case
+fn compute_neighbours<T: Point>(centroids: &[T], neigh_graph: &mut NeighbourGraph) {
+    for (c, neighbours) in centroids.iter().zip(neigh_graph.iter_mut()) {
+        neighbours.update_distances(c, centroids);
+        // Note: this ordering of sort vs. shrink leads to more work, but also more accuracy
+        // The extra work should only be an effect at the beginning
+        neighbours.sort();
+        // Optimization: dynamically adapt the number of neighbours for each cluster
+        let nclusters = centroids.len();
+        neighbours.shrink(nclusters);
+    }
 }
 
 fn update_neighbours<T: Point>(clusters: &mut Clusters<T>) {
@@ -153,7 +249,9 @@ fn update_neighbours<T: Point>(clusters: &mut Clusters<T>) {
     compute_neighbours(&clusters.centroids, &mut clusters.neighbours);
 }
 
+/********************/
 /* point assignment */
+/********************/
 
 // Returns true if some points changed assignment, false otherwise
 fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
@@ -190,7 +288,7 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
 
             let mut tested_neighbours = 0;
             // Go over the neighbouring centroids in distance order
-            for (tsi, c_to_c_dist) in clusters.neighbours[cci].iter() {
+            for (tsi, c_to_c_dist) in clusters.neighbours[cci].iter_and_record() {
                 tested_neighbours += 1;
 
                 if *c_to_c_dist > cluster_cutoff {
@@ -252,7 +350,9 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
     return some_change;
 }
 
+/***************************/
 /* Public API for Clusters */
+/***************************/
 
 impl<T> Clusters<T> {
     // Note: we don't implement the IntoIterator trait because we'd need
@@ -270,11 +370,13 @@ impl<T> Clusters<T> {
     }
 
     fn certainty_radius(&self, cid: usize) -> f64 {
-        self.neighbours[cid].get(0).map(|x| x.1).unwrap_or(0.0) / 2.0
+        self.neighbours[cid].certainty_radius()
     }
 }
 
+/**************/
 /* Unit tests */
+/**************/
 
 #[cfg(test)]
 mod test {
@@ -366,7 +468,6 @@ mod test {
         println!("{:?}", &data);
 
         let clusters = super::cluster(data, 2);
-        println!("{:?}", &clusters);
         assert_centroids(&clusters, &sq_centers[..]);
     }
 
@@ -407,7 +508,7 @@ mod test {
     #[test]
     fn proper_init_asg() {
         let data = vec![(1000, 0), (1000, 1), (-1000, 0), (-1000, 1)];
-        let clusters = super::cluster(data, 3);
+        let _clusters = super::cluster(data, 3);
         // Note: the above should fail an assertion in the tested bug
     }
 }
