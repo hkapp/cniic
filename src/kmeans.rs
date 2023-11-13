@@ -59,13 +59,18 @@ fn check_enough_active_clusters<T>(clusters: &Clusters<T>, requested_nclusters: 
 type Assignment<T> = Vec<Vec<T>>;
 
 fn init_assignment<T: Point>(mut points: Vec<T>, nclusters: usize) -> Assignment<T> {
-    // Note: we could actually implement the same mechanism if the input is an iterator
-    /* Each cluster gets one point
-     * The last one gets all the remaining points
+    /* Distribute the points evenly across the clusters
+     *   Note: this improves the effectiveness of the dynamic neighbours optimization
+     *   It's much better for that optimization than just assigning one point to each cluster
+     * The centroid becomes some point in each of these data chunks
      */
+    let points_per_cluster = points.len() / nclusters;
+    assert!(points_per_cluster > 0);
     let mut init_assignment = Vec::new();
     for _ in 0..(nclusters-1) {
-        init_assignment.push(points.pop().into_iter().collect());
+        let split_at = points.len() - points_per_cluster;
+        let points_in_this_cluster = points.split_off(split_at);
+        init_assignment.push(points_in_this_cluster);
     }
     init_assignment.push(points);
 
@@ -89,10 +94,12 @@ fn init<T: Point>(points: Vec<T>, nclusters: usize) -> Clusters<T> {
 /*************/
 
 fn init_centroids<T: Point>(assignment: &Assignment<T>) -> Vec<T> {
-    let nclusters = assignment.len();
-    let mut centroids = Vec::with_capacity(nclusters);
-    compute_centroids(&assignment, &mut centroids);
-    return centroids;
+    // Just pick any point to start with
+    // Don't do the average of randomly sampled subsets of the data
+    assignment.iter()
+        .map(|asg| &asg[0])
+        .map(|p| T::mean(std::slice::from_ref(p)).unwrap())  // We are guaranteed that there is data here from the vec access above
+        .collect()
 }
 
 fn compute_centroids<T: Point>(assignment: &Assignment<T>, centroids: &mut Vec<T>) {
@@ -114,8 +121,9 @@ fn update_centroids<T: Point>(clusters: &mut Clusters<T>) {
 
 // The neighbours of a single centroid
 struct NeighbouringCentroids {
-    watermark:  Cell<usize>,
+    src_id:     CentroidId,
     neighbours: Vec<(CentroidId, f64)>, // ordered by distance
+    watermark:  Cell<usize>,
 }
 
 impl NeighbouringCentroids {
@@ -128,14 +136,16 @@ impl NeighbouringCentroids {
         let init_watermark = neighbours.len(); // this value is important for init_neighbours
 
         NeighbouringCentroids {
+            src_id:     src,
             neighbours: neighbours,
             watermark:  Cell::new(init_watermark),
         }
     }
 
-    fn update_distances<T: Point>(&mut self, src: &T, all_centroids: &[T]) {
+    fn update_distances<T: Point>(&mut self, centroids: &[T]) {
+        let src = &centroids[self.src_id];
         for neigh in self.neighbours.iter_mut() {
-            let dst = &all_centroids[neigh.0];
+            let dst = &centroids[neigh.0];
             neigh.1 = src.dist(dst);
             assert!(neigh.1.is_finite());
         }
@@ -158,9 +168,13 @@ impl NeighbouringCentroids {
         //}
     }
 
-    fn shrink(&mut self, nclusters: usize) {
-        let upper_bound = nclusters - 1;  // max possible num neighbours
+    // Returns true if we shrunk
+    fn resize(&mut self, nclusters: usize) -> bool {
+        let max_possible_neighbours = nclusters - 1;
+        let upper_bound = max_possible_neighbours;
         let lower_bound = nclusters.ilog2() as usize + 1;  // add 1 to simulate rounding up
+        //let lower_bound = (nclusters as f32).sqrt() as usize;
+
         let dyn_val = 2 * self.watermark.get();
         let new_num_neighbours = min(
                                     max(
@@ -168,19 +182,53 @@ impl NeighbouringCentroids {
                                         lower_bound),
                                     upper_bound);
 
-        // Just do some logging, out of curiosity
-        if dyn_val < lower_bound {
-            println!("NeighbouringCentroids::shrink: lower bound triggered");
-            println!("                               dyn_val = {} < {} = lower_bound", dyn_val, lower_bound);
+        let curr_num_neighbours = self.neighbours.len();
+
+        /* Rationale for the computation here:
+         *
+         * [<<<<<<<<||||>>>>]
+         *         ||  ||
+         *         v|  ||
+         *         Watermark hit below here:
+         *         This is less than half of the previous neighbour list
+         *         Let's shrink it
+         *         But keeping some buffer space (see below)
+         *          |  ||
+         *          v  v|
+         *          Watermark hit between these values:
+         *          We accept that it neither shrinks nor grows
+         *              |
+         *              v
+         *              Watermark hit above this point:
+         *              Even though it might not have hit the ceiling,
+         *              this feels too close for comfort
+         *              Grow the buffer now
+         *              to twice the watermark
+         *
+         * There is extra complexity surrounding this check to work around the edge cases.
+         */
+        if new_num_neighbours * 3 / 4 <= curr_num_neighbours {
+            //if new_num_neighbours > curr_num_neighbours {
+                //println!("Avoid reallocation: {} > {} but {} <= {}", new_num_neighbours, curr_num_neighbours, new_num_neighbours * 3 / 4, curr_num_neighbours);
+            //}
+
+            // Shrink the neighbour list
+            self.neighbours.truncate(new_num_neighbours);
+            // Reset the watermark
+            self.watermark.replace(0);
+
+            return true;  // we shrunk
         }
+        else {
+            // Need to get new neighbours
+            // We hope that we don't need to do this too often
+            //println!("Resize actually grows! {} -> {}", self.neighbours.len(), new_num_neighbours);
 
-        // TODO need to cover the case where the watermark value requires getting more neighbours
-        assert!(new_num_neighbours <= self.neighbours.len());
-
-        self.neighbours.truncate(new_num_neighbours);
-
-        // Reset the watermark
-        self.watermark.replace(0);
+            // Get all the potential neighbours
+            // Note: the caller will re-compute the distances and come here again
+            *self = NeighbouringCentroids::new(self.src_id, nclusters);
+            return false;  // we didn't shrink
+        }
     }
 
     fn iter_and_record(&self) -> IterAndRecord {
@@ -233,15 +281,24 @@ fn init_neighbours<T: Point>(centroids: &[T]) -> NeighbourGraph {
 // Optimization: keep the array in the previous order
 // There are good chances that the array is already sorted in this case
 fn compute_neighbours<T: Point>(centroids: &[T], neigh_graph: &mut NeighbourGraph) {
-    for (c, neighbours) in centroids.iter().zip(neigh_graph.iter_mut()) {
-        neighbours.update_distances(c, centroids);
-        // Note: this ordering of sort vs. shrink leads to more work, but also more accuracy
-        // The extra work should only be an effect at the beginning
-        neighbours.sort();
-        // Optimization: dynamically adapt the number of neighbours for each cluster
-        let nclusters = centroids.len();
-        neighbours.shrink(nclusters);
+    let mut grow_count = 0;
+    for neighbours in neigh_graph.iter_mut() {
+        let mut shrunk = false;
+        while !shrunk {
+            neighbours.update_distances(centroids);
+            // Note: this ordering of sort vs. shrink leads to more work, but also more accuracy
+            // The extra work should only be an effect at the beginning
+            neighbours.sort();
+            // Optimization: dynamically adapt the number of neighbours for each cluster
+            let nclusters = centroids.len();
+            shrunk = neighbours.resize(nclusters);
+
+            if !shrunk {
+                grow_count += 1;
+            }
+        }
     }
+    println!("Grew {} neighbour lists", grow_count);
 }
 
 fn update_neighbours<T: Point>(clusters: &mut Clusters<T>) {
@@ -266,7 +323,7 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
     let mut moved_count = 0;
     let mut stayed_count = 0;
     let mut max_tested_neighbours = vec![0; old_assignment.len()];
-    let mut sum_tested_neighbours = 0;
+    let mut sum_tested_neighbours: u64 = 0;
     for (cci, x) in old_assignment.into_iter()
                             .enumerate()
                             .flat_map(|(i, v)| v.into_iter()
@@ -344,7 +401,7 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
     //println!("{:?}", clusters.centroids);
     let tot_points = moved_count + stayed_count - obvious_stay_count;
     if tot_points != 0 {
-        println!("Average tested neighbours: {}", sum_tested_neighbours / (moved_count + stayed_count - obvious_stay_count));
+        println!("Average tested neighbours: {}", sum_tested_neighbours / tot_points);
     }
 
     return some_change;
