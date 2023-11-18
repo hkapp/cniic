@@ -4,10 +4,12 @@ use std::io;
 use std::collections::{HashSet, HashMap};
 use super::hufc::Hufman;
 use super::{Codec, Img};
+use std::str::FromStr;
+use regex::Regex;
 
 /* codec: Reduce colors via k-means */
 
-pub struct RedColKM(pub usize);  // number of colors to reduce to
+pub struct RedColKM(usize);  // number of colors to reduce to
 
 impl Codec for RedColKM {
     fn encode<W: io::Write>(&self, img: &Img, writer: &mut W) -> io::Result<()> {
@@ -100,6 +102,33 @@ impl kmeans::Point for Rgb<u8> {
                 sum_vector.map(|x| (x / points.len() as u64) as u8)
             )
         )
+    }
+}
+
+impl FromStr for RedColKM {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        /* Allow:
+         *   redcol(x)
+         *   reduce-colors(x)
+         * and all the in-between
+         */
+        let regexp = Regex::new(r"red(?:uce)?-?col(?:ors)?\((\d+)\)").unwrap();
+        let matches = regexp.captures(s)
+                            .ok_or(String::from("Regex doesn't match"))?;
+
+        // We expect one capture group for the entire match,
+        // and one for out parenthesized expression.
+        if matches.len() != 2 {
+            return Err("Couldn't parse the numeric argument".into());
+        }
+
+        let digits_str = matches.get(1).unwrap();
+        let ncolors = usize::from_str(digits_str.as_str())
+                            .map_err(|e| format!("{:?}", e))?;
+
+        Ok(RedColKM(ncolors))
     }
 }
 
