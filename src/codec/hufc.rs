@@ -4,6 +4,7 @@ use std::io;
 use crate::ser::{Serialize, Deserialize};
 use crate::bit::{self, WriteBit};
 use super::{Codec, Img};
+use std::str::FromStr;
 
 /* codec: Hufman */
 
@@ -66,3 +67,16 @@ impl Codec for Hufman {
     }
 }
 
+impl FromStr for Hufman {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // TODO use a regex to be a bit more lenient
+        if s.eq_ignore_ascii_case("hufman") {
+            Ok(Hufman)
+        }
+        else {
+            Err(String::from("Not Hufman"))
+        }
+    }
+}
