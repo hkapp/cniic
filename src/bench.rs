@@ -4,19 +4,12 @@ use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use image::GenericImageView;
 use bytesize::ByteSize;
-
-pub type Img = image::DynamicImage;
-
-pub trait Bench {
-    fn encode<W: io::Write>(img: &Img, writer: &mut W) -> io::Result<()>;
-    fn decode<I: Iterator<Item = u8>>(reader: &mut I) -> Option<Img>;
-    fn name() -> String;
-}
+use crate::codec::Codec;
 
 pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
     where I: Iterator<Item = P>,
         P: AsRef<Path>,
-        T: Bench
+        T: Codec
 {
     let mut wrote_header = false;
     let mut csv = csv_writer::<T>()?;
@@ -81,7 +74,7 @@ pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
     Ok(())
 }
 
-fn csv_writer<T: Bench>() -> Result<csv::Writer<fs::File>, csv::Error> {
+fn csv_writer<T: Codec>() -> Result<csv::Writer<fs::File>, csv::Error> {
     let mut csv_filename = String::from("output/");
     csv_filename.push_str(&T::name());
     csv_filename.push_str(".csv");
