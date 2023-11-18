@@ -2,14 +2,15 @@ use crate::kmeans;
 use image::{GenericImageView, Pixel, Rgb};
 use std::io;
 use std::collections::{HashSet, HashMap};
-use super::huf::Hufman;
+use super::hufc::Hufman;
 use super::{Codec, Img};
 
 /* codec: Reduce colors via k-means */
 
-pub type RedColKM = kmeans::Clusters<Rgb<u8>>;
+pub struct RedColKM(pub usize);  // number of colors to reduce to
+
 impl Codec for RedColKM {
-    fn encode<W: io::Write>(img: &Img, writer: &mut W) -> io::Result<()> {
+    fn encode<W: io::Write>(&self, img: &Img, writer: &mut W) -> io::Result<()> {
         let pixels_iter = || img.pixels().map(|(_x, _y, px)| px.to_rgb());
 
         // For now: only cluster the unique color. Don't take their frequency into account
@@ -17,7 +18,7 @@ impl Codec for RedColKM {
         let distinct_colors = Vec::from_iter(colors_set.into_iter());
 
         let (w, h) = img.dimensions();
-        let nclusters = 4096*2;//w + h;
+        let nclusters = self.0;
         let clusters = kmeans::cluster(distinct_colors, nclusters as usize);
 
         //println!("Resulting clusters:");
@@ -49,14 +50,14 @@ impl Codec for RedColKM {
         let reduced_img = reduced_img.into();
 
         // Hufman-encode the color-reduced image
-        Hufman::encode(&reduced_img, writer)
+        Hufman.encode(&reduced_img, writer)
     }
 
-    fn decode<I: Iterator<Item = u8>>(reader: &mut I) -> Option<Img> {
-        Hufman::decode(reader)
+    fn decode<I: Iterator<Item = u8>>(&self, reader: &mut I) -> Option<Img> {
+        Hufman.decode(reader)
     }
 
-    fn name() -> String {
+    fn name(&self) -> String {
         String::from("red-colors-clusters_w+h")
     }
 }

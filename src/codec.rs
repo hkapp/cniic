@@ -1,14 +1,14 @@
-mod huf;
-mod cluster;
+mod hufc;
+mod clusterc;
 
 use std::io;
 
 pub type Img = image::DynamicImage;
 
 pub trait Codec {
-    fn encode<W: io::Write>(img: &Img, writer: &mut W) -> io::Result<()>;
-    fn decode<I: Iterator<Item = u8>>(reader: &mut I) -> Option<Img>;
-    fn name() -> String;
+    fn encode<W: io::Write>(&self, img: &Img, writer: &mut W) -> io::Result<()>;
+    fn decode<I: Iterator<Item = u8>>(&self, reader: &mut I) -> Option<Img>;
+    fn name(&self) -> String;
 }
 
-pub use cluster::RedColKM;
+pub use clusterc::RedColKM;

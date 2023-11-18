@@ -6,13 +6,13 @@ use image::GenericImageView;
 use bytesize::ByteSize;
 use crate::codec::Codec;
 
-pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
+pub fn measure_all<I, P, T>(codec: &T, paths: I) -> io::Result<()>
     where I: Iterator<Item = P>,
         P: AsRef<Path>,
         T: Codec
 {
     let mut wrote_header = false;
-    let mut csv = csv_writer::<T>()?;
+    let mut csv = csv_writer::<T>(codec)?;
 
     paths
         .map(|p| {
@@ -20,7 +20,7 @@ pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
                         .map_err(|e| format!("{:?}", e))?;
 
             let mut data = Vec::new();
-            T::encode(&img, &mut data)
+            codec.encode(&img, &mut data)
                 .map_err(|e| format!("{:?}", e))?;
 
             let compressed_size = data.len();
@@ -31,7 +31,7 @@ pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
             println!("bench: Raw size = {}", ByteSize::b(raw_size as u64));
             let compression_ratio = (compressed_size as f64) / (raw_size as f64);
 
-            let decoded = T::decode(&mut data.into_iter());
+            let decoded = codec.decode(&mut data.into_iter());
             match decoded {
                 Some(test) => {
                     if test != img {
@@ -74,9 +74,9 @@ pub fn measure_all<I, P, T>(paths: I) -> io::Result<()>
     Ok(())
 }
 
-fn csv_writer<T: Codec>() -> Result<csv::Writer<fs::File>, csv::Error> {
+fn csv_writer<T: Codec>(codec: &T) -> Result<csv::Writer<fs::File>, csv::Error> {
     let mut csv_filename = String::from("output/");
-    csv_filename.push_str(&T::name());
+    csv_filename.push_str(&codec.name());
     csv_filename.push_str(".csv");
 
     csv::Writer::from_path(&csv_filename)

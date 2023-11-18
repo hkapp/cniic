@@ -1,5 +1,5 @@
 use crate::{huf, utils};
-use image::{GenericImageView, Pixel, Rgb};
+use image::{GenericImageView, Pixel};
 use std::io;
 use crate::ser::{Serialize, Deserialize};
 use crate::bit::{self, WriteBit};
@@ -7,10 +7,10 @@ use super::{Codec, Img};
 
 /* codec: Hufman */
 
-pub type Hufman = (huf::Enc<Rgb<u8>>, huf::Dec<Rgb<u8>>);
+pub struct Hufman;
 
 impl Codec for Hufman {
-    fn encode<W: io::Write>(img: &Img, writer: &mut W) -> io::Result<()> {
+    fn encode<W: io::Write>(&self, img: &Img, writer: &mut W) -> io::Result<()> {
         let pixels_iter = || img.pixels().map(|(_x, _y, px)| px.to_rgb());
         let freqs = utils::count_freqs(pixels_iter());
         let (enc, dec) = huf::build(freqs.into_iter());
@@ -32,7 +32,7 @@ impl Codec for Hufman {
         Ok(())
     }
 
-    fn decode<I: Iterator<Item = u8>>(reader: &mut I) -> Option<Img> {
+    fn decode<I: Iterator<Item = u8>>(&self, reader: &mut I) -> Option<Img> {
         // Start by reading the decoder
         let dec: huf::Dec<image::Rgb<u8>> = Deserialize::deserialize(reader)?;
 
@@ -61,7 +61,7 @@ impl Codec for Hufman {
         Some(img.into())
     }
 
-    fn name() -> String {
+    fn name(&self) -> String {
         String::from("Hufman")
     }
 }
