@@ -65,6 +65,10 @@ impl Codec for Hufman {
     fn name(&self) -> String {
         String::from("Hufman")
     }
+
+    fn is_lossless(&self) -> bool {
+        true
+    }
 }
 
 impl FromStr for Hufman {

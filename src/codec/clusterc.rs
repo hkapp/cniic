@@ -60,7 +60,11 @@ impl Codec for ReduceColors {
     }
 
     fn name(&self) -> String {
-        String::from("red-colors-clusters_w+h")
+        format!("red-colors-clusters_{}", self.0)
+    }
+
+    fn is_lossless(&self) -> bool {
+        false
     }
 }
 

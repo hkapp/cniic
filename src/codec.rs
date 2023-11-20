@@ -10,6 +10,7 @@ pub trait Codec {
     fn encode<W: io::Write>(&self, img: &Img, writer: &mut W) -> io::Result<()>;
     fn decode<I: Iterator<Item = u8>>(&self, reader: &mut I) -> Option<Img>;
     fn name(&self) -> String;
+    fn is_lossless(&self) -> bool;
 }
 
 pub enum AnyCodec {
@@ -60,6 +61,13 @@ impl Codec for AnyCodec {
         match self {
             AnyCodec::Hufman(h)  => h.name(),
             AnyCodec::Cluster(c) => c.name()
+        }
+    }
+
+    fn is_lossless(&self) -> bool {
+        match self {
+            AnyCodec::Hufman(h)  => h.is_lossless(),
+            AnyCodec::Cluster(c) => c.is_lossless()
         }
     }
 }
