@@ -14,7 +14,7 @@ pub trait Codec {
 
 pub enum AnyCodec {
     Hufman(hufc::Hufman),
-    Cluster(clusterc::RedColKM),
+    Cluster(clusterc::ReduceColors),
 }
 
 type CodecFromStrErr = Vec<(String, String)>;
@@ -35,9 +35,9 @@ impl FromStr for AnyCodec {
                     .map(Into::into)
                     .map_err(|new_err| stack_err(prev_err, "Hufman", new_err)))
             .or_else(|prev_err|
-                clusterc::RedColKM::from_str(s)
+                clusterc::ReduceColors::from_str(s)
                     .map(Into::into)
-                    .map_err(|new_err| stack_err(prev_err, "RedColKM", new_err)))
+                    .map_err(|new_err| stack_err(prev_err, "ReduceColors", new_err)))
     }
 }
 
@@ -70,8 +70,8 @@ impl From<hufc::Hufman> for AnyCodec {
     }
 }
 
-impl From<clusterc::RedColKM> for AnyCodec {
-    fn from(c: clusterc::RedColKM) -> Self {
+impl From<clusterc::ReduceColors> for AnyCodec {
+    fn from(c: clusterc::ReduceColors) -> Self {
         AnyCodec::Cluster(c)
     }
 }
