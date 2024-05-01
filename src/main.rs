@@ -28,7 +28,10 @@ fn parse_args() -> Result<(AnyCodec, impl Iterator<Item=String>), Err> {
 }
 
 fn usage() -> String {
-    String::from("Usage: cniic --codec=<codec> [<img file>..]")
+    String::from("Usage: cniic --codec=<codec> [<img file>..]
+Available codecs:
+  hufman
+  reduce-colors(<ncolors>)")
 }
 
 fn parse_codec(input: &str) -> Result<AnyCodec, Err> {
