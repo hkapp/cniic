@@ -3,6 +3,7 @@ import os
 import glob
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 
 csv_folder = 'output/'
 
@@ -43,7 +44,7 @@ for (codec_name, codec_files) in data_series.items():
 
 # Generate the plot
 
-plt.xlabel('Compression ratio (lower is better)')
+plt.xlabel('Compression ratio (left is better)')
 # plt.xlim(0, 100)
 
 plt.ylabel('Error (lower is better)')
@@ -55,8 +56,12 @@ ax = plt.gca()
     # ax.annotate(label, (x[i]+1, y[i]+1))
 
 ax.set_xscale('log')
+ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: '{:g}'.format((1-y)*100)+'%'))
+ax.set_xticks([0.5, 0.25, 0.1, 0.05, 0.01])
+
 ax.set_yscale('symlog')
-plt.ylim(-1)
+ax.yaxis.set_major_formatter(ticker.ScalarFormatter())
+plt.ylim(-1, 1000)
 
 plt.legend()
 
