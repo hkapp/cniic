@@ -48,13 +48,6 @@ pub fn measure_all<I, P, T>(codec: &T, paths: I) -> io::Result<()>
             let error = compute_error(&img, &decoded);
 
             if error != 0.0 {
-                /* DEBUG begin
-                let mut px_pairs = test.pixels().zip(img.pixels());
-                let first_difference = px_pairs.find(|(enc_px, exp_px)| enc_px != exp_px);
-                eprintln!("First difference found: {:?}", first_difference);
-                eprintln!("Follow {} differences", px_pairs.count());
-                 * DEBUG end
-                 */
                 // Write the incorrect image to file
                 let mut path = PathBuf::from("output");
                 path.push(p.file_name().unwrap());
