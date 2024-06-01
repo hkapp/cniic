@@ -15,7 +15,7 @@ pub trait Codec {
 
 pub enum AnyCodec {
     Hufman(hufc::Hufman),
-    Cluster(clusterc::ReduceColors),
+    ClusterColors(clusterc::ClusterColors),
 }
 
 type CodecFromStrErr = Vec<(String, String)>;
@@ -36,9 +36,9 @@ impl FromStr for AnyCodec {
                     .map(Into::into)
                     .map_err(|new_err| stack_err(prev_err, "Hufman", new_err)))
             .or_else(|prev_err|
-                clusterc::ReduceColors::from_str(s)
+                clusterc::ClusterColors::from_str(s)
                     .map(Into::into)
-                    .map_err(|new_err| stack_err(prev_err, "ReduceColors", new_err)))
+                    .map_err(|new_err| stack_err(prev_err, "ClusterColors", new_err)))
     }
 }
 
@@ -46,28 +46,28 @@ impl Codec for AnyCodec {
     fn encode<W: io::Write>(&self, img: &Img, writer: &mut W) -> io::Result<()> {
         match self {
             AnyCodec::Hufman(h)  => h.encode(img, writer),
-            AnyCodec::Cluster(c) => c.encode(img, writer)
+            AnyCodec::ClusterColors(c) => c.encode(img, writer)
         }
     }
 
     fn decode<I: Iterator<Item = u8>>(&self, reader: &mut I) -> Option<Img> {
         match self {
             AnyCodec::Hufman(h)  => h.decode(reader),
-            AnyCodec::Cluster(c) => c.decode(reader)
+            AnyCodec::ClusterColors(c) => c.decode(reader)
         }
     }
 
     fn name(&self) -> String {
         match self {
             AnyCodec::Hufman(h)  => h.name(),
-            AnyCodec::Cluster(c) => c.name()
+            AnyCodec::ClusterColors(c) => c.name()
         }
     }
 
     fn is_lossless(&self) -> bool {
         match self {
             AnyCodec::Hufman(h)  => h.is_lossless(),
-            AnyCodec::Cluster(c) => c.is_lossless()
+            AnyCodec::ClusterColors(c) => c.is_lossless()
         }
     }
 }
@@ -78,8 +78,8 @@ impl From<hufc::Hufman> for AnyCodec {
     }
 }
 
-impl From<clusterc::ReduceColors> for AnyCodec {
-    fn from(c: clusterc::ReduceColors) -> Self {
-        AnyCodec::Cluster(c)
+impl From<clusterc::ClusterColors> for AnyCodec {
+    fn from(c: clusterc::ClusterColors) -> Self {
+        AnyCodec::ClusterColors(c)
     }
 }

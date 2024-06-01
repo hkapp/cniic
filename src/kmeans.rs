@@ -152,27 +152,16 @@ impl NeighbouringCentroids {
     }
 
     fn sort(&mut self) {
-        /*let already_sorted = self.neighbours
-                                .windows(2)
-                                // Optimization: consider it "good enough" if the first sqrt(nclusters) are sorted
-                                // This leads to imprecision. Though when we get to the point where the first sqrt(nclusters)
-                                // remain sorted, we can assume that the points don't go so far in the list of neighbours anymore
-                                .take((centroids.len() as f64).sqrt() as usize)
-                                .find(|xs| xs[0].1 > xs[1].1)
-                                .is_none();
-        //let already_sorted=false;
-        if !already_sorted {*/
-            // Optimization: use unstable sorting
-            // We don't care about the stability of the ordering, we're interested in speed
-            self.neighbours.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).ok_or_else(|| format!("{} <> {}", a, b)).unwrap());
-        //}
+        // No need to check whether the array is already sorted: pattern-defeating quicksort will do it
+        // Optimization: use unstable sorting
+        // We don't care about the stability of the ordering, we're interested in speed
+        self.neighbours.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).ok_or_else(|| format!("{} <> {}", a, b)).unwrap());
     }
 
     // Returns true if we shrunk
     fn resize(&mut self, nclusters: usize) -> bool {
         let max_possible_neighbours = nclusters - 1;
         let upper_bound = max_possible_neighbours;
-        //let lower_bound = nclusters.ilog2() as usize + 1;  // add 1 to simulate rounding up
         let lower_bound = (nclusters as f32).sqrt() as usize;
 
         let dyn_val = 2 * self.watermark.get();
@@ -361,18 +350,10 @@ fn assign_points<T: Point>(clusters: &mut Clusters<T>) -> bool {
                     closest_idx = Some(*tsi);
                 }
 
-                // This codepath almost never triggers but actually has a quite high impact on performance
-                /*
-                // Check if we can early stop
-                if t_dist <= clusters.certainty_radius(*tsi) {
-                    if closest_idx != Some(*tsi) {
-                        // The only case that seems to make sense is when the distance is equal
-                        assert_eq!(t_dist, min_dist, "{:?}", &clusters.neighbours[*tsi]);
-                        closest_idx = Some(*tsi);
-                    }
-                    cerainty_radius_count += 1;
-                    break;
-                }*/
+                // Fake good idea: don't check whether the point ends up in the certainty radius of this
+                // other cluster. This almost never happens.
+                // As a matter of fact, the random access required to get the certainty radius of the
+                // other cluster is worse than not performing this check.
             }
             max_tested_neighbours[cci] = std::cmp::max(max_tested_neighbours[cci], tested_neighbours);
             sum_tested_neighbours += tested_neighbours;

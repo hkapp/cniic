@@ -9,9 +9,9 @@ use regex::Regex;
 
 /* codec: Reduce colors via k-means, then apply Hufman */
 
-pub struct ReduceColors(usize);  // number of colors to reduce to
+pub struct ClusterColors(usize);  // number of colors to reduce to
 
-impl Codec for ReduceColors {
+impl Codec for ClusterColors {
     fn encode<W: io::Write>(&self, img: &Img, writer: &mut W) -> io::Result<()> {
         let pixels_iter = || img.pixels().map(|(_x, _y, px)| px.to_rgb());
 
@@ -22,14 +22,6 @@ impl Codec for ReduceColors {
         let (w, h) = img.dimensions();
         let nclusters = self.0;
         let clusters = kmeans::cluster(distinct_colors, nclusters as usize);
-
-        //println!("Resulting clusters:");
-        //for i in 0..clusters.len() {
-            //print!("{:<3?}  ", clusters[i].centroid.0);
-            //if i % 10 == 9 {
-                //println!("");
-            //}
-        //}
 
         // Convert the clusters into a direct lookup map
         let reduced_colors =
@@ -109,7 +101,7 @@ impl kmeans::Point for Rgb<u8> {
     }
 }
 
-impl FromStr for ReduceColors {
+impl FromStr for ClusterColors {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -132,7 +124,7 @@ impl FromStr for ReduceColors {
         let ncolors = usize::from_str(digits_str.as_str())
                             .map_err(|e| format!("{:?}", e))?;
 
-        Ok(ReduceColors(ncolors))
+        Ok(ClusterColors(ncolors))
     }
 }
 
