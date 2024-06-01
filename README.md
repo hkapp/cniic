@@ -14,8 +14,22 @@ This repo implements a number of naive solutions to the general problem of image
 
 ### Current status
 
-![Contribution guidelines for this project](current_status.png)
+#### Lossless codecs
+
+![Lossless codecs](lossless_status.png)
 
 Legend:
 * `png`: The lossless PNG codec with default parameters
 * `Hufman`: Hufman-coding the pixel colors
+
+#### Lossy codecs
+
+![Lossy codecs](lossy_status.png)
+
+The error is computed as the mean square error of each pixel in every image.
+
+Legend:
+* `png`: The lossless PNG codec with default parameters
+* `Hufman`: Hufman-coding the pixel colors
+* `red-colors-clusters`: cluster the image colors using K-means, then apply Hufman-coding
+  * results are shown for 16 colors (top-left), 32, 64, 128 and 256 (bottom-right)
