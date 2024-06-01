@@ -1,10 +1,11 @@
 mod bench;
 mod bit;
+mod codec;
+mod geom;
 mod huf;
 mod kmeans;
 mod utils;
 mod ser;
-mod codec;
 
 use codec::AnyCodec;
 use std::str::FromStr;

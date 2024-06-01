@@ -1,11 +1,13 @@
 use crate::kmeans;
 use image::{GenericImageView, Pixel, Rgb};
 use std::io;
-use std::collections::{HashSet, HashMap};
+use std::collections::HashMap;
 use super::hufc::Hufman;
 use super::{Codec, Img};
 use std::str::FromStr;
 use regex::Regex;
+use crate::geom::Distance;
+use crate::utils;
 
 /* codec: Reduce colors via k-means, then apply Hufman */
 
@@ -15,13 +17,14 @@ impl Codec for ClusterColors {
     fn encode<W: io::Write>(&self, img: &Img, writer: &mut W) -> io::Result<()> {
         let pixels_iter = || img.pixels().map(|(_x, _y, px)| px.to_rgb());
 
-        // For now: only cluster the unique color. Don't take their frequency into account
-        let colors_set = HashSet::<_>::from_iter(pixels_iter());
-        let distinct_colors = Vec::from_iter(colors_set.into_iter());
+        let color_counts = utils::count_freqs(pixels_iter())
+                                .into_iter()
+                                .map(|(color, count)| ColorCount { color, count: count as u32 })
+                                .collect();
 
         let (w, h) = img.dimensions();
         let nclusters = self.0;
-        let clusters = kmeans::cluster(distinct_colors, nclusters as usize);
+        let clusters = kmeans::cluster(color_counts, nclusters as usize);
 
         // Convert the clusters into a direct lookup map
         let reduced_colors =
@@ -31,7 +34,8 @@ impl Codec for ClusterColors {
                         // Note: using Rc for the new color is a fake good idea:
                         //       the reference would take more space than the repeated value
                         points_in_cluster.into_iter()
-                            .map(move |old_color| (old_color, centroid.clone()))
+                            .map(|color_count| color_count.color)
+                            .map(move |old_color| (old_color, centroid.color.clone()))
                     }));
 
         // Generate a color-reduced image
@@ -60,43 +64,50 @@ impl Codec for ClusterColors {
     }
 }
 
-impl kmeans::Point for Rgb<u8> {
+#[derive(Clone)]
+struct ColorCount {
+    color: Rgb<u8>,
+    count: u32  // what GenericImageView would return
+}
 
+impl Distance for ColorCount {
+    // We only compute the distance between the points, ignoring the weights
     fn dist(&self, other: &Self) -> f64 {
-        //self.0[..]
-            //.iter()
-            //.zip(other.0[..].iter())
-            //.map(|(x, y)| (*x as f64 - *y as f64).powi(2))
-            //.sum::<f64>()
-            //.sqrt()
-        let f = |i: usize| {
-            let x = self[i];
-            let y = other[i];
-            let diff = x as i32 - y as i32;
-            (diff * diff) as f64
-        };
-        (f(0) + f(1) + f(2)).sqrt()
+        self.color.dist(&other.color)
     }
+}
 
+impl kmeans::Point for ColorCount {
+    // Weighted average of the colors
     fn mean(points: &[Self]) -> Option<Self> {
-        fn vector_add(mut x: [u64; 3], y: &Rgb<u8>) -> [u64; 3] {
-            for i in 0..3 {
-                x[i] += y.0[i] as u64;
-            }
-            x
-        }
-
         if points.len() == 0 {
             return None;
         }
+        else if points.len() == 1 {
+            // Behave like 'clone()'
+            return Some(points[0].clone());
+        }
 
-        let sum_vector = points.iter()
-                            .fold([0, 0, 0], vector_add);
+        fn weighed_add(mut x: ([u64; 3], u64), y: &ColorCount) -> ([u64; 3], u64) {
+            for i in 0..3 {
+                x.0[i] += (y.color[i] as u64) * (y.count as u64);
+            }
+            x.1 += y.count as u64;
+            x
+        }
+        let (sum_vector, tot_weight) = points.iter()
+                                            .fold(([0, 0, 0], 0), weighed_add);
+
+        let avg_color =
+            Rgb (
+                sum_vector.map(|x| (x / tot_weight) as u8)
+            );
 
         Some(
-            Rgb (
-                sum_vector.map(|x| (x / points.len() as u64) as u8)
-            )
+            ColorCount {
+                color: avg_color,
+                count: 1
+            }
         )
     }
 }

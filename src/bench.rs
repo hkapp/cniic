@@ -9,8 +9,8 @@ use std::sync::RwLock;
 use crate::codec::{Codec, Img};
 use std::ops::DerefMut;
 use std::marker::Sync;
-use crate::kmeans::Point;
 use image::Pixel;
+use crate::geom::Distance;
 
 pub fn measure_all<I, P, T>(codec: &T, paths: I) -> io::Result<()>
     where I: Iterator<Item = P>,

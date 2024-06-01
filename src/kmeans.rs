@@ -1,9 +1,9 @@
 use std::cell::Cell;
 use std::cmp::{min, max};
+use crate::geom::Distance;
+use rand::seq::SliceRandom;
 
-pub trait Point: Sized {
-    fn dist(&self, other: &Self) -> f64;
-
+pub trait Point: Sized + Distance {
     // This must return None if the given slice is empty
     fn mean(points: &[Self]) -> Option<Self>;
 }
@@ -93,19 +93,46 @@ fn init<T: Point>(points: Vec<T>, nclusters: usize) -> Clusters<T> {
 /* centroids */
 /*************/
 
+fn fake_clone<T: Point>(p: &T) -> T {
+    T::mean(std::slice::from_ref(p))
+        .unwrap()  // We are guaranteed that there is data here
+}
+
 fn init_centroids<T: Point>(assignment: &Assignment<T>) -> Vec<T> {
     // Just pick any point to start with
     // Don't do the average of randomly sampled subsets of the data
     assignment.iter()
         .map(|asg| &asg[0])
-        .map(|p| T::mean(std::slice::from_ref(p)).unwrap())  // We are guaranteed that there is data here from the vec access above
+        .map(fake_clone)
         .collect()
 }
 
 fn compute_centroids<T: Point>(assignment: &Assignment<T>, centroids: &mut Vec<T>) {
     for points_in_cluster in assignment.iter() {
         // FIXME need to cover the case when the cluster has no data
-        centroids.push(T::mean(&points_in_cluster).unwrap());
+        match T::mean(&points_in_cluster) {
+            Some(new_centroid) => {
+                centroids.push(new_centroid);
+            }
+            None => {
+                println!("########");
+                println!("Uncommon: empty cluster");
+                println!("########");
+                // No points were assigned to this cluster
+                // Pick a random point from another cluster
+                let mut victim = assignment.choose(&mut rand::thread_rng())
+                                            .unwrap();
+                while victim.len() == 0 {
+                    victim = assignment.choose(&mut rand::thread_rng())
+                                            .unwrap();
+                }
+                // Note: we don't actually remove the picked point from the victim cluster
+                // This will happen during the next assignment phase
+                let stolen = victim.choose(&mut rand::thread_rng())
+                                    .unwrap();
+                centroids.push(fake_clone(stolen));
+            }
+        }
     }
 }
 
