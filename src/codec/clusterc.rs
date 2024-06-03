@@ -1,4 +1,5 @@
 use crate::kmeans;
+use crate::ser::{Serialize, Deserialize};
 use image::{GenericImageView, Pixel, Rgb};
 use std::io;
 use std::collections::HashMap;
@@ -136,6 +137,162 @@ impl FromStr for ClusterColors {
                             .map_err(|e| format!("{:?}", e))?;
 
         Ok(ClusterColors(ncolors))
+    }
+}
+
+/* Codec: apply 5d clustering to the pixel, then redraw as a Voronoi diagram */
+
+pub struct VoronoiCluster(usize);  // number of clusters
+
+impl Codec for VoronoiCluster {
+    fn encode<W: io::Write>(&self, img: &Img, writer: &mut W) -> io::Result<()> {
+        // Cluster the 5d points
+        let data_points = img.pixels()
+                            .map(|(x, y, c)| ColorPos { x, y, color: c.to_rgb() })
+                            .collect();
+        let clusters = kmeans::cluster(data_points, self.0);
+
+        // Write the image dimensions
+        let (w, h) = img.dimensions();
+        w.serialize(writer)?;
+        h.serialize(writer)?;
+
+        // Write the centroids
+        self.0.serialize(writer)?;
+        for (centroid, _points) in clusters.into_iter() {
+            centroid.serialize(writer)?;
+        }
+        Ok(())
+    }
+
+    fn decode<I: Iterator<Item = u8>>(&self, reader: &mut I) -> Option<Img> {
+        // Read the dimensions of the image
+        let dims: (u32, u32) = Deserialize::deserialize(reader)?;
+        let mut img = image::RgbImage::new(dims.0, dims.1);
+
+        // Read the centroids
+        let ncentroids: usize = Deserialize::deserialize(reader)?;
+        let centroids: Vec<_> = (0..ncentroids)
+                                    .map(|_| ColorPos::deserialize(reader))
+                                    .collect::<Option<Vec<_>>>()?;
+
+        // Re-create the image
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            // Find the closest centroid
+            let closest_centroid = centroids.iter()
+                                        .min_by_key(|c| (c.x - x).pow(2) + (c.y - y).pow(2))
+                                        .unwrap();
+            *px = closest_centroid.color.clone();
+        }
+
+        Some(img.into())
+    }
+
+    fn name(&self) -> String {
+        format!("voronoi_{}", self.0)
+    }
+
+    fn is_lossless(&self) -> bool {
+        false
+    }
+}
+
+struct ColorPos {
+    x:     u32,
+    y:     u32,
+    color: Rgb<u8>,
+}
+
+impl Distance for ColorPos {
+    fn dist(&self, other: &Self) -> f64 {
+        let mut d = (self.x - other.x).pow(2) as f64;
+        d += (self.y - other.y).pow(2) as f64;
+        d += self.color.dist(&other.color).powi(2);
+        (d as f64).sqrt()
+    }
+}
+
+impl kmeans::Point for ColorPos {
+    fn mean(points: &[Self]) -> Option<Self> {
+        if points.len() == 0 {
+            return None;
+        }
+
+        fn vector_add(mut x: [u64; 5], y: &ColorPos) -> [u64; 5] {
+            x[0] += y.x as u64;
+            x[1] += y.y as u64;
+            for i in 0..3 {
+                x[i+2] += y.color[i] as u64;
+            }
+            x
+        }
+        let sum_vector = points.iter()
+                                            .fold([0; 5], vector_add);
+        let avg_vector = sum_vector.map(|x| x / points.len() as u64);
+
+        Some(
+            ColorPos {
+                x: avg_vector[0] as u32,
+                y: avg_vector[1] as u32,
+                color:
+                    Rgb (
+                        [
+                            avg_vector[2] as u8,
+                            avg_vector[3] as u8,
+                            avg_vector[4] as u8,
+                        ]
+                    )
+            }
+        )
+    }
+}
+
+impl Serialize for ColorPos {
+    fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        self.x.serialize(writer)?;
+        self.y.serialize(writer)?;
+        self.color.serialize(writer)?;
+        Ok(())
+    }
+}
+
+impl Deserialize for ColorPos {
+    fn deserialize<I: Iterator<Item = u8>>(stream: &mut I) -> Option<Self> {
+        let x: u32 = Deserialize::deserialize(stream)?;
+        let y: u32 = Deserialize::deserialize(stream)?;
+        let color: Rgb<u8> = Deserialize::deserialize(stream)?;
+        Some(
+            ColorPos {
+                x,
+                y,
+                color
+            }
+        )
+    }
+}
+
+impl FromStr for VoronoiCluster {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        /* Allow:
+         *   voronoi(x)
+         */
+        let regexp = Regex::new(r"voronoi\((\d+)\)").unwrap();
+        let matches = regexp.captures(s)
+                            .ok_or(String::from("Regex doesn't match"))?;
+
+        // We expect one capture group for the entire match,
+        // and one for out parenthesized expression.
+        if matches.len() != 2 {
+            return Err("Couldn't parse the numeric argument".into());
+        }
+
+        let digits_str = matches.get(1).unwrap();
+        let ncolors = usize::from_str(digits_str.as_str())
+                            .map_err(|e| format!("{:?}", e))?;
+
+        Ok(VoronoiCluster(ncolors))
     }
 }
 
