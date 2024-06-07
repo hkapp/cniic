@@ -57,11 +57,11 @@ ax = plt.gca()
 
 ax.set_xscale('log')
 ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: '{:g}'.format((1-y)*100)+'%'))
-ax.set_xticks([0.5, 0.25, 0.1, 0.05, 0.01])
+ax.set_xticks([0.25, 0.1, 0.05, 0.01, 0.001, 0.0001])
 
 ax.set_yscale('symlog')
 ax.yaxis.set_major_formatter(ticker.ScalarFormatter())
-plt.ylim(-1, 1000)
+plt.ylim(-1, 10000)
 
 plt.legend()
 

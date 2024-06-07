@@ -31,5 +31,7 @@ The error is computed as the mean square error of each pixel in every image.
 Legend:
 * `png`: The lossless PNG codec with default parameters
 * `Hufman`: Hufman-coding the pixel colors
-* `red-colors-clusters`: cluster the image colors using K-means, then apply Hufman-coding
+* `cluster-colors`: cluster the image colors using K-means, then apply Hufman-coding
   * results are shown for 16 colors (top-left), 32, 64, 128 and 256 (bottom-right)
+* `voronoi`: cluster the pixels using K-means (position + color). Store only the clusters and reconstruct the image as a Voronoi diagram.
+  * results are shown for 64 centroids (left), 128, 256, 512, 1024 and 2048 (right)

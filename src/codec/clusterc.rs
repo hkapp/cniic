@@ -57,7 +57,7 @@ impl Codec for ClusterColors {
     }
 
     fn name(&self) -> String {
-        format!("red-colors-clusters_{}", self.0)
+        format!("cluster-colors_{}", self.0)
     }
 
     fn is_lossless(&self) -> bool {
@@ -118,11 +118,11 @@ impl FromStr for ClusterColors {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         /* Allow:
-         *   redcol(x)
-         *   reduce-colors(x)
+         *   ccol(x)
+         *   cluster-colors(x)
          * and all the in-between
          */
-        let regexp = Regex::new(r"red(?:uce)?-?col(?:ors)?\((\d+)\)").unwrap();
+        let regexp = Regex::new(r"c(?:luster)?-?col(?:ors)?\((\d+)\)").unwrap();
         let matches = regexp.captures(s)
                             .ok_or(String::from("Regex doesn't match"))?;
 
