@@ -3,6 +3,7 @@ use crate::ser::Serialize;
 
 const ZIP_SPECIAL_EOF: Symbol = Symbol::MAX;
 
+#[allow(dead_code)]
 pub fn zip_dict<I: Iterator<Item=u8>, W: io::Write>(bytes: I, output: &mut W) -> io::Result<()> {
     let mut zip = ZipDict::new(bytes);
     let mut zipped = zip.next_triplet();
@@ -10,8 +11,9 @@ pub fn zip_dict<I: Iterator<Item=u8>, W: io::Write>(bytes: I, output: &mut W) ->
     loop {
         match zipped {
             Encoded::Triplet(triplet) => {
-                triplet.as_slice()
-                    .serialize(output)?;
+                for symbol in triplet {
+                    symbol.serialize(output)?;
+                }
             }
             Encoded::PartialEOF(single_symbol) => {
                 ZIP_SPECIAL_EOF.serialize(output)?;
@@ -23,7 +25,7 @@ pub fn zip_dict<I: Iterator<Item=u8>, W: io::Write>(bytes: I, output: &mut W) ->
         }
         zipped = zip.next_triplet();
     }
-    
+
     Ok(())
 }
 
@@ -34,7 +36,6 @@ struct ZipDict<I> {
 }
 
 type Symbol = u16;
-type Triplet = [Symbol; 3];
 
 enum Encoded {
     Triplet([Symbol; 3]),
@@ -49,11 +50,12 @@ impl<I> ZipDict<I> {
             trie:    TrieMap::new(),
             counter: 0,
         };
-        
-        for b in 0x00..0xff {
+
+        // Important: use an inclusive range
+        for b in 0x00..=0xff {
             zip.new_symbol(slice::from_ref(&b));
         }
-        assert!(zip.counter == 0x0100);
+        assert_eq!(zip.counter, 0x0100);
 
         return zip;
     }
@@ -79,9 +81,10 @@ impl<I: Iterator<Item=u8>> ZipDict<I> {
             return Encoded::CleanEOF;
         }
         let symbol1 = symbol1.unwrap();
-        
+        assert!(seq1.len() > 0);
+
         let (symbol2, mut seq2) = self.find_symbol();
-        
+
         if symbol2.is_none() {
             // Here too, this can only happen if the input stream is empty
             assert!(seq2.is_empty());
@@ -89,6 +92,7 @@ impl<I: Iterator<Item=u8>> ZipDict<I> {
             return Encoded::PartialEOF(symbol1);
         }
         let symbol2 = symbol2.unwrap();
+        assert!(seq2.len() > 0);
 
         let mut total_seq = seq1;
         total_seq.append(&mut seq2);
@@ -138,7 +142,8 @@ impl<I: Iterator<Item=u8>> ZipDict<I> {
                     // There is a symbol for this subsequence
                     longest_symbol = Some(*symbol);
                     longest_seq.append(&mut extra_bytes);
-                    // Note: ewtra_bytes is now empty
+                    // Note: extra_bytes is now empty
+                    longest_seq.push(byte);
                 }
                 None => {
                     // This subsequence doesn't have any symbol attached to it
@@ -214,6 +219,8 @@ impl<T> TrieMap<T> {
 
     // Returns the previous value (if any) for that sequence
     fn insert(&mut self, seq: &[u8], value: T) -> Option<T> {
+        // We don't support empty sequences
+        assert!(seq.len() > 0);
         let mut curr_node = &mut self.0;
         for byte in &seq[0..seq.len()-1] {
             if !curr_node.has_child(*byte) {
@@ -222,7 +229,7 @@ impl<T> TrieMap<T> {
             curr_node = curr_node.child_mut(*byte).unwrap();
         }
         let final_node = curr_node;
-        let last_byte = seq.last().unwrap(); // note: we don't support empty sequences
+        let last_byte = seq.last().unwrap();
         let previous_value = std::mem::replace(&mut final_node.values[*last_byte as usize], Some(value));
         return previous_value;
         // let mut descent = self.new_descent_mut();
@@ -357,3 +364,49 @@ impl<'a, T> DescentMut<'a, T> {
     }
 }
 */
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::ser::Deserialize;
+
+    fn test_encoding(input: &[u8], expected_output: &[u16]) {
+        let mut zip_output = Vec::new();
+        zip_dict(input.into_iter().cloned(), &mut zip_output)
+            .unwrap();
+
+        // Convert the zip output into a sequence of u16
+        let mut output_bytes = zip_output.into_iter();
+        let mut zip_symbols = Vec::new();
+        while let Some(symbol) = u16::deserialize(&mut output_bytes) {
+            zip_symbols.push(symbol);
+        }
+
+        assert_eq!(&zip_symbols, expected_output);
+    }
+
+    #[test]
+    fn enc0() {
+        test_encoding(&[], &[])
+    }
+
+    #[test]
+    fn enc1() {
+        test_encoding(&[1], &[ZIP_SPECIAL_EOF, 1])
+    }
+
+    #[test]
+    fn enc2() {
+        test_encoding(&[1, 2], &[1, 2, 0x0100])
+    }
+
+    #[test]
+    fn enc4() {
+        test_encoding(&[1, 2, 1, 3], &[1, 2, 0x0100, 1, 3, 0x0101])
+    }
+
+    #[test]
+    fn enc6() {
+        test_encoding(&[1, 2, 1, 2, 1, 2], &[1, 2, 0x0100, 0x0100, 0x0100, 0x0101])
+    }
+}
