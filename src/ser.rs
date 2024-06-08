@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, slice};
 
 pub trait Serialize {
     fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()>;
@@ -16,13 +16,31 @@ pub trait Deserialize
 
 impl Serialize for u8 {
     fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_all(&[*self])
+        writer.write_all(slice::from_ref(self))
     }
 }
 
 impl Deserialize for u8 {
     fn deserialize<I: Iterator<Item = u8>>(stream: &mut I) -> Option<Self> {
         stream.next()
+    }
+}
+
+/* u16 */
+
+impl Serialize for u16 {
+    fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        writer.write_all(&self.to_le_bytes())
+    }
+}
+
+impl Deserialize for u16 {
+    fn deserialize<I: Iterator<Item = u8>>(stream: &mut I) -> Option<Self> {
+        let n = u16::from_le_bytes([
+            stream.next()?,
+            stream.next()?,
+        ]);
+        Some(n)
     }
 }
 

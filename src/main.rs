@@ -6,6 +6,7 @@ mod huf;
 mod kmeans;
 mod utils;
 mod ser;
+mod zip;
 
 use codec::AnyCodec;
 use std::str::FromStr;
