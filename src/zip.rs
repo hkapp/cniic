@@ -1,11 +1,11 @@
-use std::{io, slice};
-use crate::ser::Serialize;
+use std::{collections::HashMap, io, slice};
+use crate::ser::{Serialize, Deserialize};
 
 const ZIP_SPECIAL_EOF: Symbol = Symbol::MAX;
 
 #[allow(dead_code)]
-pub fn zip_dict<I: Iterator<Item=u8>, W: io::Write>(bytes: I, output: &mut W) -> io::Result<()> {
-    let mut zip = ZipDict::new(bytes);
+pub fn zip_dict_encode<I: Iterator<Item=u8>, W: io::Write>(bytes: I, output: &mut W) -> io::Result<()> {
+    let mut zip = DictEncoder::new(bytes);
     let mut zipped = zip.next_triplet();
 
     loop {
@@ -29,7 +29,14 @@ pub fn zip_dict<I: Iterator<Item=u8>, W: io::Write>(bytes: I, output: &mut W) ->
     Ok(())
 }
 
-struct ZipDict<I> {
+#[allow(dead_code)]
+pub fn zip_dict_decode<I: Iterator<Item=u8>>(encoded_stream: I) -> DictDecoder<I> {
+    DictDecoder::new(encoded_stream)
+}
+
+/* DictEncoder */
+
+struct DictEncoder<I> {
     input:   Input<I>,
     trie:    TrieMap<Symbol>,
     counter: Symbol
@@ -43,9 +50,9 @@ enum Encoded {
     CleanEOF
 }
 
-impl<I> ZipDict<I> {
+impl<I> DictEncoder<I> {
     fn new(input: I) -> Self {
-        let mut zip = ZipDict {
+        let mut zip = DictEncoder {
             input:   Input::new(input),
             trie:    TrieMap::new(),
             counter: 0,
@@ -69,7 +76,7 @@ impl<I> ZipDict<I> {
     }
 }
 
-impl<I: Iterator<Item=u8>> ZipDict<I> {
+impl<I: Iterator<Item=u8>> DictEncoder<I> {
     fn next_triplet(&mut self) -> Encoded {
         let (symbol1, seq1) = self.find_symbol();
 
@@ -106,33 +113,6 @@ impl<I: Iterator<Item=u8>> ZipDict<I> {
         let mut longest_symbol = None;
         let mut longest_seq = Vec::new();
         let mut extra_bytes = Vec::new();
-
-        // while let Some(byte) = self.input.next() {
-        //     match descent.down(byte) {
-        //         Some(trie_entry) => {
-        //             match trie_entry.as_ref() {
-        //                 Some(symbol) => {
-        //                     // There is a symbol for this subsequence
-        //                     longest_symbol = Some(*symbol);
-        //                     longest_seq.append(&mut extra_bytes);
-        //                     // Note: ewtra_bytes is now empty
-        //                 }
-        //                 None => {
-        //                     // This subsequence doesn't have any symbol attached to it
-        //                     // Remember the byte
-        //                     extra_bytes.push(byte);
-        //                 }
-        //             }
-        //         }
-        //         None => {
-        //             // This descent is final
-        //             // Keep track of the extra bytes
-        //             self.input.save_unused(extra_bytes);
-        //             // Return the current symbol
-        //             return (longest_symbol, longest_seq);
-        //         }
-        //     }
-        // }
 
         while let Some(byte) = self.input.next() {
             let (trie_entry, new_descent) = descent.down(byte);
@@ -201,6 +181,95 @@ impl<I> Input<I> {
     }
 }
 
+/* DictDecoder */
+
+pub struct DictDecoder<I> {
+    encoded_stream: I,
+    prev_decoded:   std::vec::IntoIter<u8>,
+    mapping:        HashMap<Symbol, Vec<u8>>
+}
+
+impl<I: Iterator<Item=u8>> Iterator for DictDecoder<I> {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.prev_decoded.next() {
+            Some(b) => {
+                // Previously decoded sequence still has bytes
+                return Some(b);
+            }
+            None => {
+                // Figure out the next sequence (if any)
+                let symbol1 = self.next_symbol()?;
+                let symbol2 = self.next_symbol().unwrap();
+
+                if symbol1 == ZIP_SPECIAL_EOF {
+                    // Next symbol is the last one
+                    let seq = self.decode(symbol2);
+                    self.store_seq(seq.clone());
+                    self.next()
+                }
+                else {
+                    // Normal path: decode a triplet
+                    let new_code = self.next_symbol().unwrap();
+
+                    let seq1 = self.decode(symbol1);
+                    let seq2 = self.decode(symbol2);
+
+                    let mut total_seq = seq1.clone();
+                    total_seq.extend_from_slice(seq2);
+
+                    self.new_mapping(new_code, total_seq.clone());
+
+                    self.store_seq(total_seq);
+                    self.next()
+                }
+            }
+        }
+    }
+}
+
+impl<I: Iterator<Item=u8>> DictDecoder<I> {
+
+    fn new(encoded_stream: I) -> Self {
+        let mut decoder =
+            DictDecoder {
+                encoded_stream,
+                prev_decoded: Vec::new().into_iter(),
+                mapping:      HashMap::new(),
+            };
+
+        for b in 0x00..=0xff {
+            // TODO: we don't actually need to generate and read back the third token in each triplet
+            // The decoder can re-generate it trivially
+            decoder.new_mapping(b as u16, vec![b]);
+        }
+
+        return decoder;
+    }
+
+    fn decode(&self, symbol: Symbol) -> &Vec<u8> {
+        self.mapping
+            .get(&symbol)
+            .unwrap()
+    }
+
+    fn next_symbol(&mut self) -> Option<Symbol> {
+        u16::deserialize(&mut self.encoded_stream)
+    }
+
+    fn store_seq(&mut self, seq: Vec<u8>) {
+        self.prev_decoded = seq.into_iter();
+    }
+
+    fn new_mapping(&mut self, symbol: Symbol, seq: Vec<u8>) {
+        self.mapping.insert(symbol, seq);
+    }
+
+}
+
+/* TrieMap */
+
 // Doesn't support mapping a value to the empty sequence
 struct TrieMap<T>(Node<T>);
 
@@ -212,10 +281,6 @@ impl<T> TrieMap<T> {
     fn new_descent(&self) -> Descent<T> {
         Descent::new(&self.0)
     }
-
-    /*fn new_descent_mut(&mut self) -> DescentMut<T> {
-        DescentMut::new(&mut self.0)
-    }*/
 
     // Returns the previous value (if any) for that sequence
     fn insert(&mut self, seq: &[u8], value: T) -> Option<T> {
@@ -232,14 +297,6 @@ impl<T> TrieMap<T> {
         let last_byte = seq.last().unwrap();
         let previous_value = std::mem::replace(&mut final_node.values[*last_byte as usize], Some(value));
         return previous_value;
-        // let mut descent = self.new_descent_mut();
-        // for byte in &seq[0..seq.len()-1] {
-        //     descent.down_or_create_empty(*byte);
-        // }
-        // let final_node = descent.curr_node;
-        // let last_byte = seq.last().unwrap(); // note: we don't support empty sequences
-        // let previous_value = std::mem::replace(&mut final_node.values[*last_byte as usize], Some(value));
-        // return previous_value;
     }
 }
 
@@ -309,7 +366,6 @@ fn default_array<const N: usize, T: Default>() -> [T; N] {
 }
 
 struct Descent<'a, T> {
-    // nodes: Vec<&'a mut Node<T>>  // TODO do we ever need to keep a stack here? can't we just keep track of the last one?
     curr_node: &'a Node<T>
 }
 
@@ -317,62 +373,23 @@ impl<'a, T> Descent<'a, T> {
     fn new(root: &'a Node<T>) -> Self {
         Descent {
             curr_node: root
-            // nodes: vec![root]
         }
     }
 
     fn down(self, byte: u8) -> (Option<&'a T>, Option<Self>) {
-        // let curr_node = *self.nodes.last()?;
-        // FIXME we want that value even if we didn't go down
         let value = self.curr_node.value_of(byte);
         let new_self = self.curr_node.child(byte).map(Self::new);
         (value, new_self)
-        // let value = &mut self.curr_node.values[byte as usize];
-        // match self.curr_node.children[byte as usize].as_mut() {
-        //     Some(mut bx) => {
-        //         self.curr_node = bx.as_mut();
-        //         // let child = bx.as_mut();
-        //         // self.nodes.push(child);
-        //         Some(value)
-        //     }
-        //     None => {
-        //         None
-        //     }
-        // }
     }
 }
-
-// Note: the borrow checker doesn't like this implementation at all
-/*struct DescentMut<'a, T> {
-    // nodes: Vec<&'a mut Node<T>>  // TODO do we ever need to keep a stack here? can't we just keep track of the last one?
-    curr_node: &'a mut Node<T>
-}
-
-impl<'a, T> DescentMut<'a, T> {
-    fn new(root: &'a mut Node<T>) -> Self {
-        DescentMut {
-            curr_node: root
-            // nodes: vec![root]
-        }
-    }
-
-    fn down_or_create_empty(&'a mut self, byte: u8) {
-        if !self.curr_node.has_child(byte) {
-            self.curr_node.add_child(byte);
-        }
-        self.curr_node = self.curr_node.child_mut(byte).unwrap();
-    }
-}
-*/
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::ser::Deserialize;
 
     fn test_encoding(input: &[u8], expected_output: &[u16]) {
         let mut zip_output = Vec::new();
-        zip_dict(input.into_iter().cloned(), &mut zip_output)
+        zip_dict_encode(input.into_iter().cloned(), &mut zip_output)
             .unwrap();
 
         // Convert the zip output into a sequence of u16
@@ -408,5 +425,42 @@ mod test {
     #[test]
     fn enc6() {
         test_encoding(&[1, 2, 1, 2, 1, 2], &[1, 2, 0x0100, 0x0100, 0x0100, 0x0101])
+    }
+
+    fn test_decoding(input: &[u8]) {
+        let mut zip_encoded = Vec::new();
+        zip_dict_encode(input.into_iter().cloned(), &mut zip_encoded)
+            .unwrap();
+
+        // Decode
+        let zip_decoded: Vec<u8> = zip_dict_decode(zip_encoded.into_iter())
+                                       .collect();
+
+        assert_eq!(&zip_decoded, input);
+    }
+
+    #[test]
+    fn dec0() {
+        test_decoding(&[])
+    }
+
+    #[test]
+    fn dec1() {
+        test_decoding(&[1])
+    }
+
+    #[test]
+    fn dec2() {
+        test_decoding(&[1, 2])
+    }
+
+    #[test]
+    fn dec4() {
+        test_decoding(&[1, 2, 1, 3])
+    }
+
+    #[test]
+    fn dec6() {
+        test_decoding(&[1, 2, 1, 2, 1, 2])
     }
 }
