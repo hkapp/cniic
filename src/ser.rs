@@ -1,4 +1,4 @@
-use std::{io, slice};
+use std::{collections::VecDeque, io, iter, slice};
 
 pub trait Serialize {
     fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()>;
@@ -181,3 +181,65 @@ impl<T:Deserialize> Deserialize for image::Rgb<T> {
         Some(arr.into())
     }
 }
+
+/* Utility: SerStream */
+
+pub struct SerStream<I> {
+    iter:   I,
+    extra:  VecDeque<u8>,
+}
+
+impl<T: Serialize> SerStream<iter::Once<T>> {
+    pub fn from_value(value: T) -> Self {
+        Self::from_iter(iter::once(value))
+    }
+}
+
+impl<T: Serialize, I: Iterator<Item=T>> SerStream<I> {
+    pub fn from_iter(iter: I) -> Self {
+        SerStream {
+            iter,
+            extra: VecDeque::new()
+        }
+    }
+}
+
+impl<T: Serialize, I: Iterator<Item = T>> Iterator for SerStream<I> {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.extra.is_empty() {
+            match self.iter.next() {
+                Some(x) => {
+                    x.serialize(&mut self.extra);
+                }
+                None => {
+                    // No more elements, we're done forever
+                    return None;
+                }
+            }
+        }
+        self.extra
+            .pop_front()
+    }
+}
+
+// pub struct SerStream {
+//     iters: VecDeque<Box<dyn Iterator<Item=u8>>>,
+//     curr_iter: Option<Box<dyn Iterator<Item=u8>>>,
+// }
+
+// impl SerStream {
+//     pub fn new() -> Self {
+//         SerStream {
+//             iters:     VecDeque::new(),
+//             curr_iter: None,
+//         }
+//     }
+
+//     pub fn push_iter<I: Iterator<Item=T>, T: Serialize>(&mut self, new_iter: I) {
+//         let byte_iter = new_iter.flat_map(|x| )
+//         self.iters
+//             .push_back()
+//     }
+// }
