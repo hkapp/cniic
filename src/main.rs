@@ -4,8 +4,9 @@ mod codec;
 mod geom;
 mod huf;
 mod kmeans;
-mod utils;
+mod prs;
 mod ser;
+mod utils;
 mod zip;
 
 use codec::AnyCodec;
