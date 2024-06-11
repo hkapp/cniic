@@ -327,10 +327,19 @@ impl<T> TrieMap<T> {
             type Item = &'a Node<U>;
             fn next(&mut self) -> Option<Self::Item> {
                 let curr_node = self.0.pop()?;
-                for entry in curr_node.children.iter() {
-                    match entry.as_ref() {
-                        Some(child) => self.0.push(child),
-                        None => {},
+                match &curr_node.children {
+                    Content::Partial { keys: _, values } => {
+                        for child in values.iter() {
+                            self.0.push(child)
+                        }
+                    }
+                    Content::Full(data) => {
+                        for entry in data.iter() {
+                            match entry.as_ref() {
+                                Some(child) => self.0.push(child),
+                                None => {},
+                            }
+                        }
                     }
                 }
                 Some(curr_node)
@@ -339,25 +348,53 @@ impl<T> TrieMap<T> {
 
         let mut node_count = 0;
         let mut total_size = 0;
-        let mut used_entries = 0;
-        let mut tot_entries = 0;
+        let mut used_child_entries = 0;
+        let mut tot_child_entries = 0;
+        let mut used_value_entries = 0;
+        let mut tot_value_entries = 0;
         for node in DFS(vec![&self.0]) {
             node_count += 1;
 
             total_size += std::mem::size_of::<Node<T>>();
 
-            used_entries += node.children
-                                .iter()
-                                .filter(|s| s.is_some())
-                                .count();
-            tot_entries += 256;
+            match &node.children {
+                Content::Partial { keys: _, values } => {
+                    used_child_entries += values.len();
+                    tot_child_entries += values.len();
+                }
+                Content::Full(data) => {
+                    used_child_entries += data.iter()
+                                            .filter(|s| s.is_some())
+                                            .count();
+                    tot_child_entries += 256;
+                }
+            }
+
+            match &node.values {
+                Content::Partial { keys: _, values } => {
+                    used_value_entries += values.len();
+                    tot_value_entries += values.len();
+                }
+                Content::Full(data) => {
+                    used_value_entries += data.iter()
+                                            .filter(|s| s.is_some())
+                                            .count();
+                    tot_value_entries += 256;
+                }
+            }
         }
         println!("Trie stats:");
+        println!("  Size of a single node: {}", ByteSize::b(std::mem::size_of::<Node<T>>() as u64));
+        println!("  Size of a content entry: {}", ByteSize::b(std::mem::size_of::<Content<T>>() as u64));
         println!("  Node count: {}", node_count);
         println!("  Total size: {}", ByteSize::b(total_size as u64));
-        let density = used_entries as f64 / tot_entries as f64;
-        println!("  Average density: {:.2}%", density * 100.0);
-        println!("  Useful size: {}", ByteSize::b((density * total_size as f64) as u64));
+        let child_density = used_child_entries as f64 / tot_child_entries as f64;
+        println!("  Child density: {:.2}%", child_density * 100.0);
+        let value_density = used_value_entries as f64 / tot_value_entries as f64;
+        println!("  Value density: {:.2}%", value_density * 100.0);
+        let useful_child_size = used_child_entries * std::mem::size_of::<Node<T>>();
+        let useful_value_size = used_value_entries * std::mem::size_of::<T>();
+        println!("  Useful size: {}", ByteSize::b((useful_child_size + useful_value_size) as u64));
     }
 }
 
