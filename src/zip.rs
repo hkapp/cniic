@@ -412,7 +412,7 @@ enum Content<T> {
         values: Vec<T>
     },
     Full (
-        [Option<T>; 256]
+        Box<[Option<T>; 256]>
     )
 }
 
@@ -504,7 +504,7 @@ impl<T> Content<T> {
             full_data[byte as usize] = Some(value);
         }
 
-        *self = Content::Full(full_data);
+        *self = Content::Full(Box::from(full_data));
     }
 }
 
