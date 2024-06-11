@@ -211,7 +211,7 @@ impl<T: Serialize, I: Iterator<Item = T>> Iterator for SerStream<I> {
         while self.extra.is_empty() {
             match self.iter.next() {
                 Some(x) => {
-                    x.serialize(&mut self.extra);
+                    x.serialize(&mut self.extra).unwrap();
                 }
                 None => {
                     // No more elements, we're done forever

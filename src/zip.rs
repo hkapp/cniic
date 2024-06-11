@@ -6,24 +6,10 @@ const ZIP_SPECIAL_EOF: Symbol = Symbol::MAX;
 #[allow(dead_code)]
 pub fn zip_dict_encode<I: Iterator<Item=u8>, W: io::Write>(bytes: I, output: &mut W) -> io::Result<()> {
     let mut zip = DictEncoder::new(bytes);
-    let mut zipped = zip.next_triplet();
 
-    loop {
-        match zipped {
-            Encoded::Triplet(triplet) => {
-                for symbol in triplet {
-                    symbol.serialize(output)?;
-                }
-            }
-            Encoded::PartialEOF(single_symbol) => {
-                ZIP_SPECIAL_EOF.serialize(output)?;
-                single_symbol.serialize(output)?;
-            }
-            Encoded::CleanEOF => {
-                break;
-            }
-        }
-        zipped = zip.next_triplet();
+    while let Some((symbol1, symbol2)) = zip.next_pair() {
+        symbol1.serialize(output)?;
+        symbol2.serialize(output)?;
     }
 
     Ok(())
@@ -44,12 +30,6 @@ struct DictEncoder<I> {
 
 type Symbol = u16;
 
-enum Encoded {
-    Triplet([Symbol; 3]),
-    PartialEOF(Symbol),
-    CleanEOF
-}
-
 impl<I> DictEncoder<I> {
     fn new(input: I) -> Self {
         let mut zip = DictEncoder {
@@ -60,24 +40,23 @@ impl<I> DictEncoder<I> {
 
         // Important: use an inclusive range
         for b in 0x00..=0xff {
-            zip.new_symbol(slice::from_ref(&b));
+            zip.create_symbol(slice::from_ref(&b));
         }
         assert_eq!(zip.counter, 0x0100);
 
         return zip;
     }
 
-    fn new_symbol(&mut self, seq: &[u8]) -> Symbol {
+    fn create_symbol(&mut self, seq: &[u8]) {
         let symbol = self.counter;
         assert!(symbol != ZIP_SPECIAL_EOF);
         self.counter += 1;
         self.trie.insert(seq, symbol);
-        return symbol;
     }
 }
 
 impl<I: Iterator<Item=u8>> DictEncoder<I> {
-    fn next_triplet(&mut self) -> Encoded {
+    fn next_pair(&mut self) -> Option<(Symbol, Symbol)> {
         let (symbol1, seq1) = self.find_symbol();
 
         if symbol1.is_none() {
@@ -85,7 +64,7 @@ impl<I: Iterator<Item=u8>> DictEncoder<I> {
             // 1 byte always yields a symbol
             assert!(seq1.is_empty());
             assert!(self.input.left_over.is_empty() && self.input.input.next().is_none());
-            return Encoded::CleanEOF;
+            return None;
         }
         let symbol1 = symbol1.unwrap();
         assert!(seq1.len() > 0);
@@ -96,15 +75,15 @@ impl<I: Iterator<Item=u8>> DictEncoder<I> {
             // Here too, this can only happen if the input stream is empty
             assert!(seq2.is_empty());
             assert!(self.input.left_over.is_empty() && self.input.input.next().is_none());
-            return Encoded::PartialEOF(symbol1);
+            return Some((symbol1, ZIP_SPECIAL_EOF));
         }
         let symbol2 = symbol2.unwrap();
         assert!(seq2.len() > 0);
 
         let mut total_seq = seq1;
         total_seq.append(&mut seq2);
-        let new_symbol = self.new_symbol(&total_seq);
-        Encoded::Triplet([symbol1, symbol2, new_symbol])
+        self.create_symbol(&total_seq);
+        Some((symbol1, symbol2))
     }
 
     fn find_symbol(&mut self) -> (Option<Symbol>, Vec<u8>) {
@@ -186,7 +165,8 @@ impl<I> Input<I> {
 pub struct DictDecoder<I> {
     encoded_stream: I,
     prev_decoded:   std::vec::IntoIter<u8>,
-    mapping:        HashMap<Symbol, Vec<u8>>
+    mapping:        HashMap<Symbol, Vec<u8>>,
+    counter:        Symbol
 }
 
 impl<I: Iterator<Item=u8>> Iterator for DictDecoder<I> {
@@ -203,27 +183,17 @@ impl<I: Iterator<Item=u8>> Iterator for DictDecoder<I> {
                 let symbol1 = self.next_symbol()?;
                 let symbol2 = self.next_symbol().unwrap();
 
-                if symbol1 == ZIP_SPECIAL_EOF {
-                    // Next symbol is the last one
-                    let seq = self.decode(symbol2);
-                    self.store_seq(seq.clone());
-                    self.next()
-                }
-                else {
-                    // Normal path: decode a triplet
-                    let new_code = self.next_symbol().unwrap();
+                let seq1 = self.decode(symbol1);
+                let seq2 = self.decode(symbol2);
 
-                    let seq1 = self.decode(symbol1);
-                    let seq2 = self.decode(symbol2);
+                let mut total_seq = seq1.clone();
+                total_seq.extend_from_slice(seq2);
 
-                    let mut total_seq = seq1.clone();
-                    total_seq.extend_from_slice(seq2);
+                let new_code = self.next_code();
+                self.new_mapping(new_code, total_seq.clone());
 
-                    self.new_mapping(new_code, total_seq.clone());
-
-                    self.store_seq(total_seq);
-                    self.next()
-                }
+                self.store_seq(total_seq);
+                self.next()
             }
         }
     }
@@ -237,13 +207,15 @@ impl<I: Iterator<Item=u8>> DictDecoder<I> {
                 encoded_stream,
                 prev_decoded: Vec::new().into_iter(),
                 mapping:      HashMap::new(),
+                counter:      0x0100,
             };
 
+        // Set up the symbol mapping
         for b in 0x00..=0xff {
-            // TODO: we don't actually need to generate and read back the third token in each triplet
-            // The decoder can re-generate it trivially
             decoder.new_mapping(b as u16, vec![b]);
         }
+        // Add the special EOF sequence
+        decoder.new_mapping(ZIP_SPECIAL_EOF, Vec::new());
 
         return decoder;
     }
@@ -260,6 +232,13 @@ impl<I: Iterator<Item=u8>> DictDecoder<I> {
 
     fn store_seq(&mut self, seq: Vec<u8>) {
         self.prev_decoded = seq.into_iter();
+    }
+
+    fn next_code(&mut self) -> Symbol {
+        let symbol = self.counter;
+        assert!(symbol < ZIP_SPECIAL_EOF);
+        self.counter += 1;
+        return symbol;
     }
 
     fn new_mapping(&mut self, symbol: Symbol, seq: Vec<u8>) {
@@ -409,22 +388,22 @@ mod test {
 
     #[test]
     fn enc1() {
-        test_encoding(&[1], &[ZIP_SPECIAL_EOF, 1])
+        test_encoding(&[1], &[1, ZIP_SPECIAL_EOF])
     }
 
     #[test]
     fn enc2() {
-        test_encoding(&[1, 2], &[1, 2, 0x0100])
+        test_encoding(&[1, 2], &[1, 2])
     }
 
     #[test]
     fn enc4() {
-        test_encoding(&[1, 2, 1, 3], &[1, 2, 0x0100, 1, 3, 0x0101])
+        test_encoding(&[1, 2, 1, 3], &[1, 2, 1, 3])
     }
 
     #[test]
     fn enc6() {
-        test_encoding(&[1, 2, 1, 2, 1, 2], &[1, 2, 0x0100, 0x0100, 0x0100, 0x0101])
+        test_encoding(&[1, 2, 1, 2, 1, 2], &[1, 2, 0x0100, 0x0100])
     }
 
     fn test_decoding(input: &[u8]) {
