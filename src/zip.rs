@@ -1,4 +1,6 @@
 use std::{collections::HashMap, io, slice};
+use bytesize::ByteSize;
+
 use crate::ser::{Serialize, Deserialize};
 
 const ZIP_SPECIAL_EOF: Symbol = Symbol::MAX;
@@ -11,6 +13,8 @@ pub fn zip_dict_encode<I: Iterator<Item=u8>, W: io::Write>(bytes: I, output: &mu
         symbol1.serialize(output)?;
         symbol2.serialize(output)?;
     }
+
+    zip.trie.print_stats();
 
     Ok(())
 }
@@ -314,6 +318,45 @@ impl<T> TrieMap<T> {
         let last_byte = seq.last().unwrap();
         let previous_value = std::mem::replace(&mut final_node.values[*last_byte as usize], Some(value));
         return previous_value;
+    }
+
+    fn print_stats(&self) {
+        struct DFS<'a, U>(Vec<&'a Node<U>>);
+        impl<'a, U> Iterator for DFS<'a, U> {
+            type Item = &'a Node<U>;
+            fn next(&mut self) -> Option<Self::Item> {
+                let curr_node = self.0.pop()?;
+                for entry in curr_node.children.iter() {
+                    match entry.as_ref() {
+                        Some(child) => self.0.push(child),
+                        None => {},
+                    }
+                }
+                Some(curr_node)
+            }
+        }
+
+        let mut node_count = 0;
+        let mut total_size = 0;
+        let mut used_entries = 0;
+        let mut tot_entries = 0;
+        for node in DFS(vec![&self.0]) {
+            node_count += 1;
+
+            total_size += std::mem::size_of::<Node<T>>();
+
+            used_entries += node.children
+                                .iter()
+                                .filter(|s| s.is_some())
+                                .count();
+            tot_entries += 256;
+        }
+        println!("Trie stats:");
+        println!("  Node count: {}", node_count);
+        println!("  Total size: {}", ByteSize::b(total_size as u64));
+        let density = used_entries as f64 / tot_entries as f64;
+        println!("  Average density: {:.2}%", density * 100.0);
+        println!("  Useful size: {}", ByteSize::b((density * total_size as f64) as u64));
     }
 }
 
