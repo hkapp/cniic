@@ -25,7 +25,7 @@ pub fn zip_dict_decode<I: Iterator<Item=u8>>(encoded_stream: I) -> DictDecoder<I
 struct DictEncoder<I> {
     input:   Input<I>,
     trie:    TrieMap<Symbol>,
-    counter: Symbol
+    abbrev:  Abbrev
 }
 
 type Symbol = u16;
@@ -35,23 +35,28 @@ impl<I> DictEncoder<I> {
         let mut zip = DictEncoder {
             input:   Input::new(input),
             trie:    TrieMap::new(),
-            counter: 0,
+            abbrev: Abbrev::new(),
         };
 
         // Important: use an inclusive range
         for b in 0x00..=0xff {
             zip.create_symbol(slice::from_ref(&b));
         }
-        assert_eq!(zip.counter, 0x0100);
+        assert_eq!(zip.abbrev.counter, 0x0100);
 
         return zip;
     }
 
     fn create_symbol(&mut self, seq: &[u8]) {
-        let symbol = self.counter;
-        assert!(symbol != ZIP_SPECIAL_EOF);
-        self.counter += 1;
-        self.trie.insert(seq, symbol);
+        match self.abbrev.next() {
+            Some(new_code) => {
+                self.trie.insert(seq, new_code);
+            }
+            None => {
+                // No more available symbols
+                // Nothing to do
+            }
+        }
     }
 }
 
@@ -166,7 +171,7 @@ pub struct DictDecoder<I> {
     encoded_stream: I,
     prev_decoded:   std::vec::IntoIter<u8>,
     mapping:        HashMap<Symbol, Vec<u8>>,
-    counter:        Symbol
+    abbrev:         Abbrev
 }
 
 impl<I: Iterator<Item=u8>> Iterator for DictDecoder<I> {
@@ -189,8 +194,14 @@ impl<I: Iterator<Item=u8>> Iterator for DictDecoder<I> {
                 let mut total_seq = seq1.clone();
                 total_seq.extend_from_slice(seq2);
 
-                let new_code = self.next_code();
-                self.new_mapping(new_code, total_seq.clone());
+                match self.next_code() {
+                    Some(new_code) => {
+                        self.new_mapping(new_code, total_seq.clone());
+                    }
+                    None => {
+                        // nothing to do
+                    }
+                }
 
                 self.store_seq(total_seq);
                 self.next()
@@ -207,7 +218,7 @@ impl<I: Iterator<Item=u8>> DictDecoder<I> {
                 encoded_stream,
                 prev_decoded: Vec::new().into_iter(),
                 mapping:      HashMap::new(),
-                counter:      0x0100,
+                abbrev:       Abbrev::start_after_trivial(),
             };
 
         // Set up the symbol mapping
@@ -234,17 +245,44 @@ impl<I: Iterator<Item=u8>> DictDecoder<I> {
         self.prev_decoded = seq.into_iter();
     }
 
-    fn next_code(&mut self) -> Symbol {
-        let symbol = self.counter;
-        assert!(symbol < ZIP_SPECIAL_EOF);
-        self.counter += 1;
-        return symbol;
+    fn next_code(&mut self) -> Option<Symbol> {
+        self.abbrev.next()
     }
 
     fn new_mapping(&mut self, symbol: Symbol, seq: Vec<u8>) {
         self.mapping.insert(symbol, seq);
     }
 
+}
+
+struct Abbrev {
+    counter: Symbol
+}
+
+impl Abbrev {
+    fn new() -> Self {
+        Abbrev {
+            counter: 0
+        }
+    }
+
+    fn start_after_trivial() -> Self {
+        Abbrev {
+            counter: 0x0100
+        }
+    }
+
+    fn next(&mut self) -> Option<Symbol> {
+        let symbol = self.counter;
+
+        if symbol == ZIP_SPECIAL_EOF {
+            None
+        }
+        else {
+            self.counter += 1;
+            Some(symbol)
+        }
+    }
 }
 
 /* TrieMap */
