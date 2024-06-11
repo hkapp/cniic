@@ -310,14 +310,15 @@ impl<T> TrieMap<T> {
         let mut curr_node = &mut self.0;
         for byte in &seq[0..seq.len()-1] {
             if !curr_node.has_child(*byte) {
-                curr_node.add_child(*byte);
+                let prev_child = curr_node.add_child(*byte);
+                assert!(prev_child.is_none());
             }
             curr_node = curr_node.child_mut(*byte).unwrap();
         }
         let final_node = curr_node;
         let last_byte = seq.last().unwrap();
-        let previous_value = std::mem::replace(&mut final_node.values[*last_byte as usize], Some(value));
-        return previous_value;
+        final_node.values
+            .upsert(*last_byte, value)
     }
 
     fn print_stats(&self) {
@@ -364,8 +365,110 @@ impl<T> TrieMap<T> {
 // a given index may have a value but no child,
 // and vice-versa
 struct Node<T> {
-    children: [Option<Box<Node<T>>>; 256],
-    values:   [Option<T>; 256]
+    children: Content<Box<Node<T>>>,
+    values:   Content<T>
+}
+
+enum Content<T> {
+    Partial {
+        keys:   Vec<u8>,
+        values: Vec<T>
+    },
+    Full (
+        [Option<T>; 256]
+    )
+}
+
+impl<T> Content<T> {
+    fn new() -> Self {
+        Self::Partial {
+            keys:   Vec::new(),
+            values: Vec::new()
+        }
+    }
+
+    fn find(keys: &[u8], byte: u8) -> Option<usize> {
+        keys.into_iter()
+            .enumerate()
+            .find(|(_, x)| **x == byte)
+            .map(|(idx, _)| idx)
+    }
+
+    fn get(&self, byte: u8) -> Option<&T> {
+        match self {
+            Content::Partial { keys, values } => {
+                let idx = Self::find(keys, byte)?;
+                values.get(idx)
+            }
+            Content::Full(data) => {
+                (&data[byte as usize]).as_ref()
+            }
+        }
+    }
+
+    fn get_mut(&mut self, byte: u8) -> Option<&mut T> {
+        match self {
+            Content::Partial { keys, values } => {
+                let idx = Self::find(keys, byte)?;
+                values.get_mut(idx)
+            }
+            Content::Full(data) => {
+                (&mut data[byte as usize]).as_mut()
+            }
+        }
+    }
+
+    const THRESHOLD: usize = 64;
+
+    fn upsert(&mut self, byte: u8, new_value: T) -> Option<T> {
+        match self {
+            Content::Partial { keys, values } => {
+                match Self::find(keys, byte) {
+                    Some(existing_idx) => {
+                        // Replace
+                        let target = values.get_mut(existing_idx).unwrap();
+                        let prev_value = std::mem::replace(target, new_value);
+                        Some(prev_value)
+                    }
+                    None => {
+                        // Insert
+                        if keys.len() < Self::THRESHOLD {
+                            // Remain in partial format
+                            keys.push(byte);
+                            values.push(new_value);
+                            None
+                        }
+                        else {
+                            // Convert to Full
+                            self.to_full();
+                            self.upsert(byte, new_value)
+                        }
+                    }
+                }
+            }
+            Content::Full(data) => {
+                std::mem::replace(&mut data[byte as usize], Some(new_value))
+            }
+        }
+    }
+
+    fn to_full(&mut self) {
+        println!("Converting Content::Partial into Content::Full!");
+        let (partial_keys, partial_values) =
+            match self {
+                Content::Partial { keys, values } =>
+                    (std::mem::take(keys), std::mem::take(values)),
+                _ => unreachable!(),
+            };
+
+        let mut full_data = default_array();
+        for (byte, value) in partial_keys.into_iter()
+                                        .zip(partial_values.into_iter()) {
+            full_data[byte as usize] = Some(value);
+        }
+
+        *self = Content::Full(full_data);
+    }
 }
 
 impl<T> Node<T> {
@@ -374,34 +477,34 @@ impl<T> Node<T> {
     }
 
     fn child(&self, byte: u8) -> Option<&Node<T>> {
-        self.children[byte as usize]
-            .as_ref()
+        self.children
+            .get(byte)
             .map(Box::as_ref)
     }
 
     // Returns the previous entry (if any)
     fn add_child(&mut self, byte: u8) -> Option<Box<Node<T>>> {
         let new_child = Self::new();
-        let new_child = Some(Box::from(new_child));
-        std::mem::replace(&mut self.children[byte as usize], new_child)
+        let new_child = Box::from(new_child);
+        self.children
+            .upsert(byte, new_child)
     }
 
     fn new() -> Self {
         Node {
-            children: default_array(),
-            values:   default_array()
+            children: Content::new(),
+            values:   Content::new()
         }
     }
 
     fn child_mut(&mut self, byte: u8) -> Option<&mut Self> {
-        self.children[byte as usize]
-            .as_mut()
+        self.children
+            .get_mut(byte)
             .map(Box::as_mut)
     }
 
     fn value_of(&self, byte: u8) -> Option<&T> {
-        self.values[byte as usize]
-            .as_ref()
+        self.values.get(byte)
     }
 }
 
