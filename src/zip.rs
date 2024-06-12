@@ -398,6 +398,43 @@ impl<T> TrieMap<T> {
     }
 }
 
+impl<T> Drop for TrieMap<T> {
+    fn drop(&mut self) {
+        // Run a DFS over the Trie, dropping children nodes as we go along
+        // This avoids a stack overflow in drop() when the trie is very deep
+        // Because we have a recursive data structure, drop() is also called
+        // recursively
+        let mut stack: Vec<Box<Node<T>>> = Vec::new();
+
+        fn handle_children<T>(curr_node: &mut Node<T>, stack: &mut Vec<Box<Node<T>>>) {
+            match &mut curr_node.children {
+                Content::Partial { keys: _, values } => {
+                    stack.append(values)
+                }
+                Content::Full(data) => {
+                    for child_ref in data.iter_mut() {
+                        match std::mem::take(child_ref) {
+                            Some(child_own) => {
+                                stack.push(child_own)
+                            }
+                            None => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        handle_children(&mut self.0, &mut stack);
+        while !stack.is_empty() {
+            let mut curr_node = stack.pop().unwrap();
+            handle_children(&mut curr_node, &mut stack);
+            // curr_node is dropped here
+            // When it is dropped here, it doesn't have any children anymore,
+            // avoiding the recursive call to drop()
+        }
+    }
+}
+
 // The two fields are independent:
 // a given index may have a value but no child,
 // and vice-versa
