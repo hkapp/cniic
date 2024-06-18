@@ -21,6 +21,7 @@ This repo implements a number of naive solutions to the general problem of image
 Legend:
 * `png`: The lossless PNG codec with default parameters
 * `Hufman`: Hufman-coding the pixel colors
+* `zip-dict`: Zip-inspired online dictionary building
 
 #### Lossy codecs
 
@@ -35,3 +36,21 @@ Legend:
   * results are shown for 16 colors (top-left), 32, 64, 128 and 256 (bottom-right)
 * `voronoi`: cluster the pixels using K-means (position + color). Store only the clusters and reconstruct the image as a Voronoi diagram.
   * results are shown for 64 centroids (left), 128, 256, 512, 1024 and 2048 (right)
+* `zip-dict`: Zip-inspired online dictionary building
+
+### ASCII art codec descriptions
+
+Who doesn't love ASCII art?
+In this section, it's used to help explain the various codecs listed above.
+
+#### zip-dict
+
+```
+input:  0x01   0x02   0x01 0x02 0x01 0x02        0x0001 -> 0x01
+          |      |    ^^^^^^^^^ ^^^^^^^^^          ...
+          |      |        |       |              0x00ff -> 0xff
+          v      v        v       v        +...> 0x0100 -> 0x01 0x02
+output: 0x0001 0x0002   0x0100 0x0100      :     0x0101 -> 0x0100 0x0100
+        ^^^^^^^^^^^^^    ^ ^ ^ ^ ^ ^       :                ^ ^ ^ ^ ^ ^
+              +............................+             = 0x01 0x02 0x01 0x02
+```
