@@ -65,7 +65,7 @@ impl Codec for ClusterColors {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 struct ColorCount {
     color: Rgb<u8>,
     count: u32  // what GenericImageView would return
@@ -303,9 +303,9 @@ mod tests {
 
     #[test]
     fn rgb_mean() {
-        let p1 = Rgb([0, 0, 0]);
-        let p2 = Rgb([2, 2, 2]);
-        let expected = Rgb([1, 1, 1]);
+        let p1 = ColorCount { color: Rgb([0, 0, 0]), count: 1 };
+        let p2 = ColorCount { color: Rgb([2, 2, 2]), count: 1 };
+        let expected = ColorCount { color: Rgb([1, 1, 1]), count: 1 };
         assert_eq!(Point::mean(&[p1, p2][..]), Some(expected));
     }
 

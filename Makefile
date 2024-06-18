@@ -19,34 +19,38 @@ data/DIV2K_valid_HR:
 
 LOSSLESS_DIAGRAM = output/boxplot.png
 LOSSY_DIAGRAM = output/error_vs_compression.png
-ALL_DIAGRAMS = $(LOSSLESS_DIAGRAM) $(LOSSY_DIAGRAM)
+
+TRACKED_DIAGRAMS = lossy_status.png lossless_status.png
 
 CODEC_DEPS = src/bench.rs
 CARGO_RUN = cargo run --release --
 DATASET = data/DIV2K_valid_HR/*
 
-LOSSLESS_CODECS = $(HUFMAN)
+LOSSLESS_CODECS = $(HUFMAN) $(ZIP)
 HUFMAN = output/Hufman.csv
+ZIP = output/zip-dict.csv
 
-LOSSY_CODECS = $(CLUSTER_COLORS) $(VORONOI)
+LOSSY_CODECS =
+# the following codecs are too slow to recompute every time:
+# $(CLUSTER_COLORS) $(VORONOI)
 CLUSTER_COLORS = output/cluster-colors_16.csv output/cluster-colors_32.csv output/cluster-colors_64.csv \
 	output/cluster-colors_128.csv output/cluster-colors_256.csv
 VORONOI = output/voronoi_64.csv	output/voronoi_128.csv output/voronoi_256.csv output/voronoi_512.csv \
 	output/voronoi_1024.csv output/voronoi_2048.csv
 
-hello:
-	echo hello
-	echo "hello again"
+diagrams: $(TRACKED_DIAGRAMS)
 
-diagrams: $(ALL_DIAGRAMS)
+lossless_status.png: $(LOSSLESS_DIAGRAM)
+	cp $(LOSSLESS_DIAGRAM) lossless_status.png
+
+lossy_status.png: $(LOSSY_DIAGRAM)
+	cp $(LOSSY_DIAGRAM) lossy_status.png
 
 $(LOSSLESS_DIAGRAM): $(LOSSLESS_CODECS) boxplot.py
 	python3 boxplot.py
-	cp $(LOSSLESS_DIAGRAM) lossless_status.png
 
 $(LOSSY_DIAGRAM): $(LOSSLESS_CODECS) $(LOSSY_CODECS) error_vs_compression_plot.py
 	python3 error_vs_compression_plot.py
-	cp $(LOSSY_DIAGRAM) lossy_status.png
 
 $(HUFMAN): $(CODEC_DEPS) src/huf.rs src/codec/hufc.rs
 	$(CARGO_RUN) --codec=hufman $(DATASET)
@@ -56,3 +60,6 @@ output/cluster-colors_%.csv: $(CODEC_DEPS) src/kmeans.rs src/codec/clusterc.rs
 
 output/voronoi_%.csv: $(CODEC_DEPS) src/kmeans.rs src/codec/clusterc.rs
 	$(CARGO_RUN) --codec="voronoi($*)" $(DATASET)
+
+$(ZIP): $(CODEC_DEPS) src/zip.rs src/codec/zipc.rs
+	$(CARGO_RUN) --codec="zip(dict)" $(DATASET)

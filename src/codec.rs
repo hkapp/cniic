@@ -1,5 +1,6 @@
-mod hufc;
 mod clusterc;
+mod hufc;
+mod zipc;
 
 use std::io;
 use std::str::FromStr;
@@ -17,6 +18,7 @@ pub enum AnyCodec {
     Hufman(hufc::Hufman),
     ClusterColors(clusterc::ClusterColors),
     VoronoiCluster(clusterc::VoronoiCluster),
+    Zip(zipc::Zip),
 }
 
 type CodecFromStrErr = Vec<(String, String)>;
@@ -44,6 +46,10 @@ impl FromStr for AnyCodec {
                 clusterc::VoronoiCluster::from_str(s)
                     .map(Into::into)
                     .map_err(|new_err| stack_err(prev_err, "VoronoiCluster", new_err)))
+            .or_else(|prev_err|
+                zipc::Zip::from_str(s)
+                    .map(Into::into)
+                    .map_err(|new_err| stack_err(prev_err, "Zip", new_err)))
     }
 }
 
@@ -53,6 +59,7 @@ impl Codec for AnyCodec {
             AnyCodec::Hufman(h)  => h.encode(img, writer),
             AnyCodec::ClusterColors(c) => c.encode(img, writer),
             AnyCodec::VoronoiCluster(c) => c.encode(img, writer),
+            AnyCodec::Zip(c) => c.encode(img, writer),
         }
     }
 
@@ -61,6 +68,7 @@ impl Codec for AnyCodec {
             AnyCodec::Hufman(h)  => h.decode(reader),
             AnyCodec::ClusterColors(c) => c.decode(reader),
             AnyCodec::VoronoiCluster(c) => c.decode(reader),
+            AnyCodec::Zip(c) => c.decode(reader),
         }
     }
 
@@ -69,6 +77,7 @@ impl Codec for AnyCodec {
             AnyCodec::Hufman(h)  => h.name(),
             AnyCodec::ClusterColors(c) => c.name(),
             AnyCodec::VoronoiCluster(c) => c.name(),
+            AnyCodec::Zip(c) => c.name(),
         }
     }
 
@@ -77,6 +86,7 @@ impl Codec for AnyCodec {
             AnyCodec::Hufman(h)  => h.is_lossless(),
             AnyCodec::ClusterColors(c) => c.is_lossless(),
             AnyCodec::VoronoiCluster(c) => c.is_lossless(),
+            AnyCodec::Zip(c) => c.is_lossless(),
         }
     }
 }
@@ -96,5 +106,11 @@ impl From<clusterc::ClusterColors> for AnyCodec {
 impl From<clusterc::VoronoiCluster> for AnyCodec {
     fn from(c: clusterc::VoronoiCluster) -> Self {
         AnyCodec::VoronoiCluster(c)
+    }
+}
+
+impl From<zipc::Zip> for AnyCodec {
+    fn from(c: zipc::Zip) -> Self {
+        AnyCodec::Zip(c)
     }
 }

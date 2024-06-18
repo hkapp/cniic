@@ -448,7 +448,7 @@ mod test {
     use super::*;
     use std::collections::HashSet;
 
-    impl Point for (i32, i32) {
+    impl Distance for (i32, i32) {
         fn dist(&self, other: &Self) -> f64 {
             fn diff_squared(a: i32, b: i32) -> f64 {
                 ((a - b) as f64).powi(2)
@@ -456,7 +456,9 @@ mod test {
 
             (diff_squared(self.0, other.0) + diff_squared(self.1, other.1)).sqrt()
         }
+    }
 
+    impl Point for (i32, i32) {
         fn mean(points: &[Self]) -> Option<Self> {
             if points.len() == 0 {
                 return None;

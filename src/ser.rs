@@ -1,4 +1,4 @@
-use std::io;
+use std::{collections::VecDeque, io, iter, slice};
 
 pub trait Serialize {
     fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()>;
@@ -16,13 +16,31 @@ pub trait Deserialize
 
 impl Serialize for u8 {
     fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_all(&[*self])
+        writer.write_all(slice::from_ref(self))
     }
 }
 
 impl Deserialize for u8 {
     fn deserialize<I: Iterator<Item = u8>>(stream: &mut I) -> Option<Self> {
         stream.next()
+    }
+}
+
+/* u16 */
+
+impl Serialize for u16 {
+    fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        writer.write_all(&self.to_le_bytes())
+    }
+}
+
+impl Deserialize for u16 {
+    fn deserialize<I: Iterator<Item = u8>>(stream: &mut I) -> Option<Self> {
+        let n = u16::from_le_bytes([
+            stream.next()?,
+            stream.next()?,
+        ]);
+        Some(n)
     }
 }
 
@@ -161,5 +179,48 @@ impl<T:Deserialize> Deserialize for image::Rgb<T> {
         let vec: Vec<T> = Deserialize::deserialize(stream)?;
         let arr: [T; 3] = vec.try_into().ok()?;
         Some(arr.into())
+    }
+}
+
+/* Utility: SerStream */
+
+/// Converts a stream of types implementing the [Serialize] trait into a stream of bytes
+pub struct SerStream<I> {
+    iter:   I,
+    extra:  VecDeque<u8>,
+}
+
+impl<T: Serialize> SerStream<iter::Once<T>> {
+    pub fn from_value(value: T) -> Self {
+        Self::from_iter(iter::once(value))
+    }
+}
+
+impl<T: Serialize, I: Iterator<Item=T>> SerStream<I> {
+    pub fn from_iter(iter: I) -> Self {
+        SerStream {
+            iter,
+            extra: VecDeque::new()
+        }
+    }
+}
+
+impl<T: Serialize, I: Iterator<Item = T>> Iterator for SerStream<I> {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.extra.is_empty() {
+            match self.iter.next() {
+                Some(x) => {
+                    x.serialize(&mut self.extra).unwrap();
+                }
+                None => {
+                    // No more elements, we're done forever
+                    return None;
+                }
+            }
+        }
+        self.extra
+            .pop_front()
     }
 }
