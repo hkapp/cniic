@@ -184,6 +184,7 @@ impl<T:Deserialize> Deserialize for image::Rgb<T> {
 
 /* Utility: SerStream */
 
+/// Converts a stream of types implementing the [Serialize] trait into a stream of bytes
 pub struct SerStream<I> {
     iter:   I,
     extra:  VecDeque<u8>,
@@ -223,23 +224,3 @@ impl<T: Serialize, I: Iterator<Item = T>> Iterator for SerStream<I> {
             .pop_front()
     }
 }
-
-// pub struct SerStream {
-//     iters: VecDeque<Box<dyn Iterator<Item=u8>>>,
-//     curr_iter: Option<Box<dyn Iterator<Item=u8>>>,
-// }
-
-// impl SerStream {
-//     pub fn new() -> Self {
-//         SerStream {
-//             iters:     VecDeque::new(),
-//             curr_iter: None,
-//         }
-//     }
-
-//     pub fn push_iter<I: Iterator<Item=T>, T: Serialize>(&mut self, new_iter: I) {
-//         let byte_iter = new_iter.flat_map(|x| )
-//         self.iters
-//             .push_back()
-//     }
-// }

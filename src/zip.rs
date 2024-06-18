@@ -5,7 +5,6 @@ use crate::ser::{Serialize, Deserialize};
 
 const ZIP_SPECIAL_EOF: Symbol = Symbol::MAX;
 
-#[allow(dead_code)]
 pub fn zip_dict_encode<I: Iterator<Item=u8>, W: io::Write>(bytes: I, output: &mut W) -> io::Result<()> {
     let mut zip = DictEncoder::new(bytes);
 
@@ -19,7 +18,6 @@ pub fn zip_dict_encode<I: Iterator<Item=u8>, W: io::Write>(bytes: I, output: &mu
     Ok(())
 }
 
-#[allow(dead_code)]
 pub fn zip_dict_decode<I: Iterator<Item=u8>>(encoded_stream: I) -> DictDecoder<I> {
     DictDecoder::new(encoded_stream)
 }
@@ -138,6 +136,7 @@ impl<I: Iterator<Item=u8>> DictEncoder<I> {
     }
 }
 
+/// A wrapper over an iterator that can also save extra unused bytes
 struct Input<I> {
     input:     I,
     left_over: Vec<u8> // last element must be the first to be returned
@@ -259,6 +258,7 @@ impl<I: Iterator<Item=u8>> DictDecoder<I> {
 
 }
 
+/// A simple counter to generate the next unused symbol
 struct Abbrev {
     counter: Symbol
 }
@@ -443,6 +443,11 @@ struct Node<T> {
     values:   Content<T>
 }
 
+// Optimize the memory requirement of the trie:
+// While a node stores only a small number of entries,
+// perform a linear scan on a stored 'keys' Vec
+// When the node becomes big enough, revert to explicit
+// format, which allows direct indexing
 enum Content<T> {
     Partial {
         keys:   Vec<u8>,
@@ -492,6 +497,7 @@ impl<T> Content<T> {
         }
     }
 
+    // When is a Partial node big enough to be converted to Full
     const THRESHOLD: usize = 64;
 
     fn upsert(&mut self, byte: u8, new_value: T) -> Option<T> {
@@ -602,6 +608,7 @@ fn default_array<const N: usize, T: Default>() -> [T; N] {
         .unwrap()
 }
 
+/// An immutable descent into the [TrieMap]
 struct Descent<'a, T> {
     curr_node: &'a Node<T>
 }
