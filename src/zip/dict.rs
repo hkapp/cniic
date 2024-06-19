@@ -1,7 +1,7 @@
 use std::{collections::HashMap, io, slice};
 use bytesize::ByteSize;
 
-use crate::ser::{Serialize, Deserialize};
+use crate::{ser::{Deserialize, Serialize}, utils::default_array};
 
 const ZIP_SPECIAL_EOF: Symbol = Symbol::MAX;
 
@@ -146,8 +146,9 @@ impl<I: Iterator<Item=u8>> Iterator for Input<I> {
     type Item = u8;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.left_over.pop()
-                .or_else(|| self.input.next())
+        self.left_over
+            .pop()
+            .or_else(|| self.input.next())
     }
 }
 
@@ -586,26 +587,6 @@ impl<T> Node<T> {
     fn value_of(&self, byte: u8) -> Option<&T> {
         self.values.get(byte)
     }
-}
-
-fn default_array<const N: usize, T: Default>() -> [T; N] {
-    // From https://www.reddit.com/r/rust/comments/mg1crv/comment/gssaazc/?utm_source=share&utm_medium=web3x&utm_name=web3xcss&utm_term=1&utm_content=share_button
-    // let mut array: [MaybeUninit<T>; N] = unsafe {
-    //     MaybeUninit::uninit().assume_init()
-    // };
-    // for elem in array.iter_mut() {
-    //     *elem = MaybeUninit::new(T::default());
-    // }
-    // unsafe {
-    //     // std::mem::transmute::<_, [T; N]>(array)
-    //     *(&array as *const [MaybeUninit<T>; N] as *const [T; N])
-    // }
-    (0..N)
-        .map(|_| T::default())
-        .collect::<Vec<T>>()
-        .try_into()
-        .map_err(|v: Vec<T>| v.len())
-        .unwrap()
 }
 
 /// An immutable descent into the [TrieMap]
