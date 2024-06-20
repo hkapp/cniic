@@ -137,6 +137,7 @@ impl<I: Iterator<Item = u8>> Encoder<I> {
                         // Extend the current explicit
                         let must_return = extend_explicit(self, &mut curr_explicit);
                         if must_return {
+                            push_explicit(curr_explicit, channel);
                             return;
                         }
                     }
@@ -146,6 +147,7 @@ impl<I: Iterator<Item = u8>> Encoder<I> {
                     // TODO consider using a goto or conditional guard on the match arm to share the code with above
                     let must_return = extend_explicit(self, &mut curr_explicit);
                     if must_return {
+                        push_explicit(curr_explicit, channel);
                         return;
                     }
                 }
@@ -207,12 +209,14 @@ impl History {
         self.index[starting_byte as usize]
             .iter()
             .map(|starting_index| {
+                let rel_pos = starting_index - self.start;
                 let subseq =
                     self.data
                         .iter()
                         .cloned()
-                        .skip(starting_index - self.start);
-                (*starting_index, subseq)
+                        .skip(rel_pos);
+                let lookback = self.data.len() - rel_pos;
+                (lookback, subseq)
             })
     }
 
@@ -315,105 +319,71 @@ impl<I: Iterator<Item = T>, T: Copy> Iterator for Buffered<I, T> {
         }
         self.next_saved()
             .map(|x| *x)
-
-        /*let mut res = self.saved.get(self.read_pos);
-        if res.is_none() {
-            // Try to read from the iterator
-            self.iter
-                .next()
-                .into_iter()
-                .for_each(|x| {
-                    self.saved.push(x);
-                    self.read_pos += 1;
-                });
-
-            res = self.saved.get(self.read_pos);
-        }
-
-        return res;*/
-
-        /*match self.read_pos {
-            Some(pos) => {
-                // Read from the saved data
-                let x = self.saved[pos];
-                pos += 1;
-                return Some(x);
-            }
-            None => {
-                // Read from the iterator
-                match self.iter.next() {
-                    Some(x) => {
-                        self.saved.push(x);
-                        return Some(x);
-                    }
-                    None => {
-                        return None;
-                    }
-                }
-            }
-        }*/
-    }
-}
-/*
-struct Checkpoint<I, T> {
-    iter:     I,
-    saved:    Vec<T>,
-    read_pos: usize
-}
-
-impl<I, T> Checkpoint<I, T> {
-    fn from(iter: I) -> Self {
-        Checkpoint {
-            iter,
-            saved: Vec::new(),
-            read_pos: 0
-        }
-    }
-
-    fn restore(&mut self) {
-        self.read_pos = 0;
     }
 }
 
-impl<I: Iterator<Item = T>, T> Iterator for Checkpoint<I, T> {
-    type Item = &T;
+#[cfg(test)]
+mod test {
+    use super::*;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        let mut res = self.saved.get(self.read_pos);
-        if res.is_none() {
-            // Try to read from the iterator
-            self.iter
-                .next()
-                .into_iter()
-                .for_each(|x| {
-                    self.saved.push(x);
-                    self.read_pos += 1;
-                });
+    fn test_encode(input: &[u8], expected_symbols: &[Symbol]) {
+        let mut zip_output = Vec::new();
+        zip_back_encode(input.iter().cloned(), &mut zip_output)
+            .unwrap();
 
-            res = self.saved.get(self.read_pos);
+        let mut expected_output = Vec::new();
+        for s in expected_symbols {
+            s.serialize(&mut expected_output)
+                .unwrap();
         }
 
-        return res;
-
-        /*match self.read_pos {
-            Some(pos) => {
-                // Read from the saved data
-                let x = self.saved[pos];
-                pos += 1;
-                return Some(x);
-            }
-            None => {
-                // Read from the iterator
-                match self.iter.next() {
-                    Some(x) => {
-                        self.saved.push(x);
-                        return Some(x);
-                    }
-                    None => {
-                        return None;
-                    }
-                }
-            }
-        }*/
+        assert_eq!(&zip_output, &expected_output);
     }
-}*/
+
+    #[test]
+    fn enc0() {
+        test_encode(&[], &[])
+    }
+
+    #[test]
+    fn enc1() {
+        test_encode(&[0x01], &[Symbol::Explicit(vec![0x01])])
+    }
+
+    #[test]
+    fn enc2_no_repeat() {
+        test_encode(&[0x01, 0x02], &[Symbol::Explicit(vec![0x01, 0x02])])
+    }
+
+    #[test]
+    fn enc2_repeat() {
+        test_encode(&[0x01, 0x01], &[Symbol::Explicit(vec![0x01, 0x01])])
+    }
+
+    #[test]
+    fn enc6() {
+        test_encode(&[0x01; 6], &[Symbol::Explicit(Vec::from([0x01; 6]))])
+    }
+
+    #[test]
+    fn enc16_repeat() {
+        test_encode(&[0x01; 16],
+            &[Symbol::Explicit(Vec::from([0x01; 8])),
+                        Symbol::LookBack(LookBack { len: 8, back: 8 })])
+    }
+
+    #[test]
+    fn enc16_no_repeat() {
+        let data =
+            [
+                0x01, 0x01, 0x01, 0x01,
+                0x01, 0x01, 0x01, 0x01,
+                0x02, 0x02, 0x02, 0x02,
+                0x02, 0x02, 0x02, 0x02
+            ];
+
+        test_encode(
+            &data,
+            &[Symbol::Explicit(Vec::from(data))])
+    }
+}
