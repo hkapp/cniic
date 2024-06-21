@@ -1,5 +1,5 @@
 use std::{cmp::max, collections::VecDeque, io};
-use crate::{ser::Serialize, utils::default_array};
+use crate::{ser::{Serialize, Deserialize}, utils::default_array};
 
 #[allow(dead_code)]
 pub fn zip_back_encode<I: Iterator<Item=u8>, W: io::Write>(bytes: I, output: &mut W) -> io::Result<()> {
@@ -15,6 +15,11 @@ pub fn zip_back_encode<I: Iterator<Item=u8>, W: io::Write>(bytes: I, output: &mu
     Ok(())
 }
 
+#[allow(dead_code)]
+pub fn zip_back_decode<I: Iterator<Item=u8>>(input: I) -> Decoder<I> {
+    Decoder::new(input)
+}
+
 enum Symbol {
     Explicit(Vec<u8>),
     LookBack(LookBack)
@@ -28,21 +33,38 @@ struct LookBack {
 type Len = u16;
 type Back = u16;
 
-const ENUM_CODE_EXPLICIT: u8 = 0;
-const ENUM_CODE_LOOKBACK: u8 = 1;
+impl Symbol {
+    const ENUM_CODE_EXPLICIT: u8 = 0;
+    const ENUM_CODE_LOOKBACK: u8 = 1;
+
+    fn mask(msb: u8) -> Len {
+        (msb as Len).rotate_right(1)
+    }
+
+    fn compress_len(len: usize, enum_decider: u8) -> Len {
+        assert!(len <= (Len::MAX >> 1) as usize);
+
+        let mask: Len = Self::mask(enum_decider);
+        (len as Len) | mask
+    }
+
+    fn decompress_len(compressed_len: Len) -> (u8, usize) {
+        let mask: Len = Self::mask(1);
+        let msb = (compressed_len & mask).rotate_left(1) as u8;
+
+        let mask = !mask;
+        let lsbs = compressed_len & mask;
+
+        (msb, lsbs as usize)
+    }
+}
+
 
 impl Serialize for Symbol {
     fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
-        fn form_length(len: usize, enum_decider: u8) -> Len {
-            assert!(len <= (Len::MAX >> 1) as usize);
-
-            let mask: Len = (enum_decider as Len).rotate_right(1);
-            (len as Len) | mask
-        }
-
         match self {
             Symbol::Explicit(explicit_data) => {
-                let compacted_len = form_length(explicit_data.len(), ENUM_CODE_EXPLICIT);
+                let compacted_len = Self::compress_len(explicit_data.len(), Self::ENUM_CODE_EXPLICIT);
                 compacted_len.serialize(writer)?;
 
                 // Note: we can't use Vec::serialize() as it also serializes
@@ -52,7 +74,7 @@ impl Serialize for Symbol {
                 }
             }
             Symbol::LookBack(LookBack { len, back }) => {
-                form_length(*len, ENUM_CODE_LOOKBACK)
+                Self::compress_len(*len, Self::ENUM_CODE_LOOKBACK)
                     .serialize(writer)?;
 
                 (*back as Back).serialize(writer)?;
@@ -61,6 +83,27 @@ impl Serialize for Symbol {
         Ok(())
     }
 }
+
+impl Deserialize for Symbol {
+    fn deserialize<I: Iterator<Item = u8>>(stream: &mut I) -> Option<Self> {
+        let compressed_len = Len::deserialize(stream)?;
+        let (enum_decider, len) = Self::decompress_len(compressed_len);
+        match enum_decider {
+            Self::ENUM_CODE_EXPLICIT => {
+                let data: Vec<u8> = stream.take(len).collect();
+                assert!(data.len() == len);
+                Some(Symbol::Explicit(data))
+            }
+            Self::ENUM_CODE_LOOKBACK => {
+                let back = Back::deserialize(stream)?;
+                Some(Symbol::LookBack(LookBack { len, back: back as usize }))
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+/* Encoder */
 
 struct Encoder<I> {
     history: History,
@@ -259,6 +302,18 @@ impl History {
             self.write(*b);
         }
     }
+
+    fn duplicate(&mut self, lb: &LookBack) -> Vec<u8> {
+        let bytes_to_copy: Vec<u8> =
+            self.data
+                .iter()
+                .cloned()
+                .skip(self.data.len() - lb.back)
+                .take(lb.len)
+                .collect();
+        self.write_all(&bytes_to_copy);
+        bytes_to_copy
+    }
 }
 
 struct Buffered<I, T> {
@@ -319,6 +374,57 @@ impl<I: Iterator<Item = T>, T: Copy> Iterator for Buffered<I, T> {
         }
         self.next_saved()
             .map(|x| *x)
+    }
+}
+
+/* Decoder */
+
+// TODO try to share some of this with the zip dict decoder
+pub struct Decoder<I> {
+    iter:    I,
+    history: History,
+    decoded: VecDeque<u8>
+}
+
+impl<I: Iterator<Item = u8>> Iterator for Decoder<I> {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.decoded
+            .pop_front()
+            .or_else(|| {
+                self.decode_next();
+                self.decoded.pop_front()
+            })
+    }
+}
+
+impl<I> Decoder<I> {
+    fn new(input: I) -> Self {
+        Decoder {
+            iter:    input,
+            history: History::new(),
+            decoded: VecDeque::new(),
+        }
+    }
+}
+
+impl<I: Iterator<Item = u8>> Decoder<I> {
+    fn decode_next(&mut self) {
+        let symbol = Symbol::deserialize(&mut self.iter);
+        match symbol {
+            Some(Symbol::Explicit(explicit_data)) => {
+                self.history.write_all(&explicit_data);
+                self.decoded.extend(&explicit_data);
+            }
+            Some(Symbol::LookBack(lb)) => {
+                let lookback_slice = self.history.duplicate(&lb);
+                self.decoded.extend(lookback_slice);
+            }
+            None => {
+                // input stream is empty, nothing left to do
+            }
+        }
     }
 }
 
@@ -386,4 +492,59 @@ mod test {
             &data,
             &[Symbol::Explicit(Vec::from(data))])
     }
+
+    fn test_decode(input: &[u8]) {
+        let mut zip_output = Vec::new();
+        zip_back_encode(input.iter().cloned(), &mut zip_output)
+            .unwrap();
+
+        let decoded: Vec<u8> = zip_back_decode(zip_output.into_iter()).collect();
+
+        assert_eq!(&decoded, &input);
+    }
+
+
+    #[test]
+    fn dec0() {
+        test_decode(&[])
+    }
+
+    #[test]
+    fn dec1() {
+        test_decode(&[0x01])
+    }
+
+    #[test]
+    fn dec2_no_repeat() {
+        test_decode(&[0x01, 0x02])
+    }
+
+    #[test]
+    fn dec2_repeat() {
+        test_decode(&[0x01, 0x01])
+    }
+
+    #[test]
+    fn dec6() {
+        test_decode(&[0x01; 6])
+    }
+
+    #[test]
+    fn dec16_repeat() {
+        test_decode(&[0x01; 16])
+    }
+
+    #[test]
+    fn dec16_no_repeat() {
+        let data =
+            [
+                0x01, 0x01, 0x01, 0x01,
+                0x01, 0x01, 0x01, 0x01,
+                0x02, 0x02, 0x02, 0x02,
+                0x02, 0x02, 0x02, 0x02
+            ];
+
+        test_decode(&data)
+    }
+
 }
