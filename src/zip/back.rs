@@ -64,6 +64,7 @@ impl Serialize for Symbol {
     fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         match self {
             Symbol::Explicit(explicit_data) => {
+                print!("\n-{} ", explicit_data.len());
                 let compacted_len = Self::compress_len(explicit_data.len(), Self::ENUM_CODE_EXPLICIT);
                 compacted_len.serialize(writer)?;
 
@@ -74,6 +75,7 @@ impl Serialize for Symbol {
                 }
             }
             Symbol::LookBack(LookBack { len, back }) => {
+                print!("+{} ", len);
                 Self::compress_len(*len, Self::ENUM_CODE_LOOKBACK)
                     .serialize(writer)?;
 
@@ -249,8 +251,23 @@ impl History {
     }
 
     fn subseqs_starting(&self, starting_byte: u8) -> impl Iterator<Item = (usize, impl Iterator<Item = u8> + '_)> {
+        let valid_entries =
+            self.index[starting_byte as usize]
+                .iter()
+                .filter(|pos| **pos >= self.start)
+                .count();
+        print!("?{} ", valid_entries);
+        let byte_count =
+            self.data
+                .iter()
+                .filter(|b| **b == starting_byte)
+                .count();
+        assert_eq!(valid_entries, byte_count);
+        assert!(self.data.len() <= MAX_RING_BUFFER_SIZE);
+
         self.index[starting_byte as usize]
             .iter()
+            .filter(|pos| **pos >= self.start)
             .map(|starting_index| {
                 let rel_pos = starting_index - self.start;
                 let subseq =
