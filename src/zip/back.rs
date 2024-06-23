@@ -232,29 +232,24 @@ impl<I: Iterator<Item = u8>> Encoder<I> {
     }
 }
 
-struct History {
-    data:  VecDeque<u8>,
-    index: [Vec<usize>; 256],
-    /// The position of the ring buffer's head in the entire input stream
-    start: usize
-}
-
 const MAX_RING_BUFFER_SIZE: usize = (Back::MAX as usize) + 1;
+struct History {
+    data:  RingBuffer<u8, MAX_RING_BUFFER_SIZE>,
+    index: Index,
+}
 
 impl History {
     fn new() -> Self {
         History {
-            data:  VecDeque::with_capacity(MAX_RING_BUFFER_SIZE),
-            index: default_array(),
-            start: 0
+            data:  RingBuffer::default(),
+            index: Index::new(),
         }
     }
 
     fn subseqs_starting(&self, starting_byte: u8) -> impl Iterator<Item = (usize, impl Iterator<Item = u8> + '_)> {
         let valid_entries =
-            self.index[starting_byte as usize]
-                .iter()
-                .filter(|pos| **pos >= self.start)
+            self.index
+                .start_indices_for(starting_byte, &self.data)
                 .count();
         print!("?{} ", valid_entries);
         let byte_count =
@@ -265,53 +260,19 @@ impl History {
         assert_eq!(valid_entries, byte_count);
         assert!(self.data.len() <= MAX_RING_BUFFER_SIZE);
 
-        self.index[starting_byte as usize]
-            .iter()
-            .filter(|pos| **pos >= self.start)
+        self.index
+            .start_indices_for(starting_byte, &self.data)
             .map(|starting_index| {
-                let rel_pos = starting_index - self.start;
-                let subseq =
-                    self.data
-                        .iter()
-                        .cloned()
-                        .skip(rel_pos);
-                let lookback = self.data.len() - rel_pos;
-                (lookback, subseq)
+                let subseq = self.data.iter_starting(starting_index);
+                // TODO assert that the overlap is at least one in the caller
+                let lookback = self.data.lookback_value(starting_index);
+                (lookback, subseq.cloned())
             })
     }
 
     fn write(&mut self, b: u8) {
-        // Is our ring buffer full?
-        if self.data.len() == MAX_RING_BUFFER_SIZE {
-            // Free up a slot
-            self.data.pop_front();
-            // Increase the start value
-            self.start += 1;
-        }
-
-        // Write the byte in the ring buffer
-        self.data.push_back(b);
-
-        // Update the index
-        self.update_index(b);
-    }
-
-    fn update_index(&mut self, b: u8) {
-        let pos = self.start + self.data.len() - 1;
-        let index_entry = &mut self.index[b as usize];
-
-        // 1. Try to find an entry to update
-        for m in index_entry.iter_mut() {
-            if *m < self.start {
-                // Entry is no longer relevant
-                // We can replace it
-                *m = pos;
-                return;
-            }
-        }
-        // No entry could be replace
-        // Add a new one now
-        index_entry.push(pos);
+        self.data.write(b);
+        self.index.update(b, &self.data);
     }
 
     fn write_all(&mut self, bytes: &[u8]) {
@@ -321,17 +282,179 @@ impl History {
     }
 
     fn duplicate(&mut self, lb: &LookBack) -> Vec<u8> {
+        let global_start = self.data.lookback_pos(lb.back);
         let bytes_to_copy: Vec<u8> =
             self.data
-                .iter()
+                .iter_starting(global_start)
                 .cloned()
-                .skip(self.data.len() - lb.back)
                 .take(lb.len)
                 .collect();
         self.write_all(&bytes_to_copy);
         bytes_to_copy
     }
 }
+
+/// A ring buffer queue with overwrite
+struct RingBuffer<T, const N: usize> {
+    data:      [T; N],
+    /// The position of the ring buffer's head in the entire input stream
+    start:     usize,
+    write_pos: usize
+}
+
+impl<T: Default, const N: usize> Default for RingBuffer<T, N> {
+    fn default() -> Self {
+        RingBuffer {
+            data:      default_array(),
+            start:     0,
+            write_pos: 0
+        }
+    }
+}
+
+impl<T, const N: usize> RingBuffer<T, N> {
+    fn contains(&self, pos: usize) -> bool {
+        if self.wrapped_around() {
+            pos >= self.start
+        }
+        else {
+            pos < self.write_pos
+        }
+    }
+
+    fn wrapped_around(&self) -> bool {
+        self.start > 0
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &T> {
+        self.valid_slice()
+            .into_iter()
+    }
+
+    fn valid_slice(&self) -> &[T] {
+        if self.wrapped_around() {
+            &self.data
+        }
+        else {
+            &self.data[0..self.write_pos]
+        }
+    }
+
+    /// How many values are currently stored in this ring buffer
+    /// WARNING this is independent from e.g. [Self::read_pos]
+    fn len(&self) -> usize {
+        if self.wrapped_around() {
+            N
+        }
+        else {
+            self.write_pos
+        }
+    }
+
+    fn iter_starting(&self, iter_start: usize) -> impl Iterator<Item = &T> {
+        let (mut left, mut right) = self.as_slices();
+
+        // Compute the relative start
+        let rel_start = iter_start - self.start;
+        if left.len() >= rel_start {
+            left = &left[rel_start..];
+        }
+        else {
+            let left_skip = left.len();
+            left = &[];
+            let right_skip = rel_start - left_skip;
+            right = &right[right_skip..];
+        }
+
+        left.into_iter()
+            .chain(right.into_iter())
+    }
+
+    fn as_slices(&self) -> (&[T], &[T]) {
+        if self.wrapped_around() {
+            //            [... x y ...]
+            // write_pos:      ^
+            // x hasn't been overwritten yet,
+            // so it's the first left in the previous side
+            // ==> x must be included in `left`
+            let left = &self.data[self.write_pos..];
+            let right = &self.data[0..self.write_pos];
+            (left, right)
+        }
+        else {
+            (self.valid_slice(), &[])
+        }
+    }
+
+    fn write(&mut self, x: T) {
+        let mut first_wrap = false;
+        if self.write_pos == N {
+            // Need to wrap around
+            first_wrap = self.start == 0;
+            self.write_pos = 0;
+        }
+
+        if self.start > 0 || first_wrap {
+            self.start += 1;
+        }
+
+        self.data[self.write_pos] = x;
+
+        self.write_pos += 1;
+    }
+
+    fn lookback_value(&self, pos: usize) -> usize {
+        let rel_pos = pos - self.start;
+        self.len() - rel_pos
+    }
+
+    /// The converse method for [Self::lookback_value]
+    fn lookback_pos(&self, pos: usize) -> usize {
+        self.len() - pos + self.start
+    }
+
+    fn read_pos(&self) -> usize {
+        self.start + self.len()
+    }
+}
+
+/* Index */
+
+struct Index([Vec<usize>; 256]);
+
+impl Index {
+    fn new() -> Self {
+        Self(default_array())
+    }
+
+    fn start_indices_for<'a, const N: usize>(&'a self, starting_byte: u8, rbuf: &'a RingBuffer<u8, N>) -> impl Iterator<Item = usize> + 'a {
+        self.0[starting_byte as usize]
+            .iter()
+            .cloned()
+            .filter(|pos| rbuf.contains(*pos))
+    }
+
+    fn update<const N: usize>(&mut self, b: u8, rbuf: &RingBuffer<u8, N>) {
+        // IMPORTANT: we assume that the byte as already been written in rbuf, so we must decrement
+        let pos = rbuf.read_pos() - 1;
+        let index_entry = &mut self.0[b as usize];
+
+        // 1. Try to find an entry to update
+        for m in index_entry.iter_mut() {
+            if !rbuf.contains(*m) {
+                // Entry is no longer relevant
+                // We can replace it
+                *m = pos;
+                return;
+            }
+        }
+        // No entry could be replaced
+        // Add a new one now
+        index_entry.push(pos);
+    }
+}
+
+/* Buffered */
 
 struct Buffered<I, T> {
     iter:     I,
@@ -399,7 +522,9 @@ impl<I: Iterator<Item = T>, T: Copy> Iterator for Buffered<I, T> {
 // TODO try to share some of this with the zip dict decoder
 pub struct Decoder<I> {
     iter:    I,
-    history: History,
+    history: History, // TODO replace with RingBuffer
+    // TODO rename RingBuffer<u8, MAX...> to PlainHistory
+    // TODO rename current History to IndexedHistory
     decoded: VecDeque<u8>
 }
 
