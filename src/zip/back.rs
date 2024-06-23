@@ -108,14 +108,14 @@ impl Deserialize for Symbol {
 /* Encoder */
 
 struct Encoder<I> {
-    history: History,
+    history: IndexedHistory,
     input:   Buffered<I, u8>
 }
 
 impl<I> Encoder<I> {
     fn new(input: I) -> Self {
         Encoder {
-            history: History::new(),
+            history: IndexedHistory::new(),
             input:   Buffered::new(input)
         }
     }
@@ -233,14 +233,16 @@ impl<I: Iterator<Item = u8>> Encoder<I> {
 }
 
 const MAX_RING_BUFFER_SIZE: usize = (Back::MAX as usize) + 1;
-struct History {
-    data:  RingBuffer<u8, MAX_RING_BUFFER_SIZE>,
+type PlainHistory = RingBuffer<u8, MAX_RING_BUFFER_SIZE>;
+
+struct IndexedHistory {
+    data:  PlainHistory,
     index: Index,
 }
 
-impl History {
+impl IndexedHistory {
     fn new() -> Self {
-        History {
+        IndexedHistory {
             data:  RingBuffer::default(),
             index: Index::new(),
         }
@@ -279,18 +281,6 @@ impl History {
         for b in bytes {
             self.write(*b);
         }
-    }
-
-    fn duplicate(&mut self, lb: &LookBack) -> Vec<u8> {
-        let global_start = self.data.lookback_pos(lb.back);
-        let bytes_to_copy: Vec<u8> =
-            self.data
-                .iter_starting(global_start)
-                .cloned()
-                .take(lb.len)
-                .collect();
-        self.write_all(&bytes_to_copy);
-        bytes_to_copy
     }
 }
 
@@ -416,6 +406,21 @@ impl<T, const N: usize> RingBuffer<T, N> {
     fn read_pos(&self) -> usize {
         self.start + self.len()
     }
+
+    fn lookback_sequence(&self, lb: &LookBack) -> impl Iterator<Item = &T> {
+        let global_start = self.lookback_pos(lb.back);
+
+        self.iter_starting(global_start)
+            .take(lb.len)
+    }
+}
+
+impl<T: Copy, const N: usize> RingBuffer<T, N> {
+    fn write_all(&mut self, new_data: &[T]) {
+        for x in new_data {
+            self.write(*x);
+        }
+    }
 }
 
 /* Index */
@@ -522,9 +527,7 @@ impl<I: Iterator<Item = T>, T: Copy> Iterator for Buffered<I, T> {
 // TODO try to share some of this with the zip dict decoder
 pub struct Decoder<I> {
     iter:    I,
-    history: History, // TODO replace with RingBuffer
-    // TODO rename RingBuffer<u8, MAX...> to PlainHistory
-    // TODO rename current History to IndexedHistory
+    history: PlainHistory,
     decoded: VecDeque<u8>
 }
 
@@ -545,7 +548,7 @@ impl<I> Decoder<I> {
     fn new(input: I) -> Self {
         Decoder {
             iter:    input,
-            history: History::new(),
+            history: PlainHistory::default(),
             decoded: VecDeque::new(),
         }
     }
@@ -560,13 +563,25 @@ impl<I: Iterator<Item = u8>> Decoder<I> {
                 self.decoded.extend(&explicit_data);
             }
             Some(Symbol::LookBack(lb)) => {
-                let lookback_slice = self.history.duplicate(&lb);
+                let lookback_slice = self.duplicate(&lb);
                 self.decoded.extend(lookback_slice);
             }
             None => {
                 // input stream is empty, nothing left to do
             }
         }
+    }
+}
+
+impl<I: Iterator<Item = u8>> Decoder<I> {
+    fn duplicate(&mut self, lb: &LookBack) -> Vec<u8> {
+        let bytes_to_copy: Vec<u8> =
+            self.history
+                .lookback_sequence(lb)
+                .cloned()
+                .collect();
+        self.history.write_all(&bytes_to_copy);
+        bytes_to_copy
     }
 }
 
