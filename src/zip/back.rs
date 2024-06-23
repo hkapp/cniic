@@ -1,4 +1,4 @@
-use std::{cmp::max, collections::VecDeque, io};
+use std::{cmp::max, collections::{HashMap, VecDeque}, io};
 use crate::{ser::{Serialize, Deserialize}, utils::default_array};
 
 #[allow(dead_code)]
@@ -122,7 +122,7 @@ impl<I> Encoder<I> {
 }
 
 // TODO explain
-const MIN_REP: Len = 6;
+const MIN_REP: usize = 6;
 
 impl<I: Iterator<Item = u8>> Encoder<I> {
     fn next_symbols(&mut self, channel: &mut Vec<Symbol>) {
@@ -169,7 +169,7 @@ impl<I: Iterator<Item = u8>> Encoder<I> {
             match self.next_repetition() {
                 Some(lb@LookBack { len: rep_len, .. }) => {
                     // TODO explain that '>=' is better than '>'
-                    if rep_len >= MIN_REP as usize {
+                    if rep_len >= MIN_REP {
                         // Repetition is useful because long enough
                         // Push the current explicit symbol
                         // and the new repetition
@@ -202,12 +202,16 @@ impl<I: Iterator<Item = u8>> Encoder<I> {
 
     fn next_repetition(&mut self) -> Option<LookBack> {
         let mut checkpoint = Buffered::new(&mut self.input);
-        let starting_byte = checkpoint.next()?;
+        let prefix =
+            (&mut checkpoint).take(MIN_REP)
+                            .collect::<Vec<_>>()
+                            .try_into()
+                            .ok()?;
         checkpoint.restore();
 
         let mut max_rep_len = 0;
         let mut max_rep_back = 0;
-        for (lookback, subseq) in self.history.subseqs_starting(starting_byte) {
+        for (lookback, subseq) in self.history.subseqs_starting(&prefix) {
             let rep_len =
                 (&mut checkpoint).zip(subseq)
                     .take_while(|(a, b)| a == b)
@@ -248,10 +252,10 @@ impl IndexedHistory {
         }
     }
 
-    fn subseqs_starting(&self, starting_byte: u8) -> impl Iterator<Item = (usize, impl Iterator<Item = u8> + '_)> {
+    fn subseqs_starting(&self, prefix: &Key) -> impl Iterator<Item = (usize, impl Iterator<Item = u8> + '_)> {
         let valid_entries =
             self.index
-                .start_indices_for(starting_byte, &self.data)
+                .start_indices_for(prefix, &self.data)
                 .count();
         print!("?{} ", valid_entries);
         // let byte_count =
@@ -263,7 +267,7 @@ impl IndexedHistory {
         // assert!(self.data.len() <= MAX_RING_BUFFER_SIZE);
 
         self.index
-            .start_indices_for(starting_byte, &self.data)
+            .start_indices_for(prefix, &self.data)
             .map(|starting_index| {
                 let subseq = self.data.iter_starting(starting_index);
                 // TODO assert that the overlap is at least one in the caller
@@ -273,8 +277,13 @@ impl IndexedHistory {
     }
 
     fn write(&mut self, b: u8) {
+        // Keep track in the ring buffer
+        // It is important for the read_pos() call to stay here, before the write() call
+        let pos = self.data.read_pos();
         self.data.write(b);
-        self.index.update(b, &self.data);
+
+        // Update the index
+        self.index.update(b, pos);
     }
 
     fn write_all(&mut self, bytes: &[u8]) {
@@ -426,37 +435,85 @@ impl<T: Copy, const N: usize> RingBuffer<T, N> {
 
 /* Index */
 
-struct Index([VecDeque<usize>; 256]);
+struct Index {
+    old:        Box<HashMap<Key, Vec<usize>>>,
+    new:        Box<HashMap<Key, Vec<usize>>>,
+    incomplete: VecDeque<(usize, Vec<u8>)>
+}
+
+// TODO explain
+type Key = [u8; MIN_REP];
 
 impl Index {
     fn new() -> Self {
-        Self(default_array())
+        Index {
+            old:        Box::new(HashMap::new()),
+            new:        Box::new(HashMap::new()),
+            incomplete: VecDeque::new(),
+        }
     }
 
-    fn start_indices_for<'a, const N: usize>(&'a self, starting_byte: u8, rbuf: &'a RingBuffer<u8, N>) -> impl Iterator<Item = usize> + 'a {
-        self.0[starting_byte as usize]
-            .iter()
-            .cloned()
-            .filter(|pos| rbuf.contains(*pos))
+    fn start_indices_for<'a, const N: usize>(&'a self, seq_start: &Key, rbuf: &'a RingBuffer<u8, N>) -> impl Iterator<Item = usize> + 'a {
+        let entry_iter = |m: &'a HashMap<Key, Vec<usize>>| {
+            m.get(seq_start)
+                .map(|v| v.iter())
+                .unwrap_or_else(|| (&[]).into_iter())
+                .cloned()
+                .filter(|x| rbuf.contains(*x))
+        };
+
+        let old_indices = entry_iter(&self.old);
+
+        // Somehow the maintenance criteria is not enough to guarantee that
+        // the values in this iterator don't need to be filtered.
+        // Normally I think that they shouldn't have to
+        let new_indices = entry_iter(&self.new);
+
+        old_indices.chain(new_indices)
     }
 
-    fn update<const N: usize>(&mut self, b: u8, rbuf: &RingBuffer<u8, N>) {
-        // IMPORTANT: we assume that the byte as already been written in rbuf, so we must decrement
-        let index_entry = &mut self.0[b as usize];
+    /// Update the index JUST AFTER the given byte has been added to the given ring buffer
+    fn update(&mut self, latest_byte: u8, latest_pos: usize) {
+        // 1. update the existing incomplete subsequences
+        let new_key = self.update_incomplete_keys(latest_byte, latest_pos);
 
-        // 1. Clean up the irrelevant entries
-        while let Some(pos) = index_entry.pop_front() {
-            if rbuf.contains(pos) {
-                // This entry and all the ones that follow are valid
-                // Put the popped entry back where it was and stop clean up
-                index_entry.push_front(pos);
-                break;
-            }
+        // 2. Insert the one that's ready (if any)
+        if let Some((key_pos, key_val)) = new_key {
+            self.new
+                .entry(key_val)
+                .and_modify(|v| v.push(key_pos))
+                .or_insert(vec![key_pos]);
         }
 
-        // 2. Add the new entry
-        let new_pos = rbuf.read_pos() - 1;
-        index_entry.push_back(new_pos);
+        // 3. wrap around maintenance
+        if (latest_pos % MAX_RING_BUFFER_SIZE) == 0 && !self.new.is_empty() {
+            // This is a wrap-around
+            // Clear the previous 'old' then swap the hash map pointers
+            // Note: this maintenance is always valid because we're guaranteed that none of the
+            // positions in the 'old' hash map are valid anymore
+            self.old.clear();
+            std::mem::swap(&mut self.old, &mut self.new);
+            assert!(self.new.is_empty());
+        }
+    }
+
+    fn update_incomplete_keys(&mut self, latest_byte: u8, latest_pos: usize) -> Option<(usize, Key)> {
+        self.incomplete.push_back((latest_pos, Vec::with_capacity(MIN_REP)));
+
+        for (_, k) in self.incomplete.iter_mut() {
+            k.push(latest_byte);
+        }
+
+        if self.incomplete.front().unwrap().1.len() == MIN_REP {
+            // The first key is ready
+            let (pos, vec) = self.incomplete.pop_front().unwrap();
+            let full_key = vec.try_into().unwrap();
+            Some((pos, full_key))
+        }
+        else {
+            // No key is ready right now
+            None
+        }
     }
 }
 
