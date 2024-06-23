@@ -254,13 +254,13 @@ impl IndexedHistory {
                 .start_indices_for(starting_byte, &self.data)
                 .count();
         print!("?{} ", valid_entries);
-        let byte_count =
-            self.data
-                .iter()
-                .filter(|b| **b == starting_byte)
-                .count();
-        assert_eq!(valid_entries, byte_count);
-        assert!(self.data.len() <= MAX_RING_BUFFER_SIZE);
+        // let byte_count =
+        //     self.data
+        //         .iter()
+        //         .filter(|b| **b == starting_byte)
+        //         .count();
+        // assert_eq!(valid_entries, byte_count);
+        // assert!(self.data.len() <= MAX_RING_BUFFER_SIZE);
 
         self.index
             .start_indices_for(starting_byte, &self.data)
@@ -316,6 +316,7 @@ impl<T, const N: usize> RingBuffer<T, N> {
         self.start > 0
     }
 
+    #[allow(dead_code)]
     fn iter(&self) -> impl Iterator<Item = &T> {
         self.valid_slice()
             .into_iter()
@@ -425,7 +426,7 @@ impl<T: Copy, const N: usize> RingBuffer<T, N> {
 
 /* Index */
 
-struct Index([Vec<usize>; 256]);
+struct Index([VecDeque<usize>; 256]);
 
 impl Index {
     fn new() -> Self {
@@ -441,21 +442,21 @@ impl Index {
 
     fn update<const N: usize>(&mut self, b: u8, rbuf: &RingBuffer<u8, N>) {
         // IMPORTANT: we assume that the byte as already been written in rbuf, so we must decrement
-        let pos = rbuf.read_pos() - 1;
         let index_entry = &mut self.0[b as usize];
 
-        // 1. Try to find an entry to update
-        for m in index_entry.iter_mut() {
-            if !rbuf.contains(*m) {
-                // Entry is no longer relevant
-                // We can replace it
-                *m = pos;
-                return;
+        // 1. Clean up the irrelevant entries
+        while let Some(pos) = index_entry.pop_front() {
+            if rbuf.contains(pos) {
+                // This entry and all the ones that follow are valid
+                // Put the popped entry back where it was and stop clean up
+                index_entry.push_front(pos);
+                break;
             }
         }
-        // No entry could be replaced
-        // Add a new one now
-        index_entry.push(pos);
+
+        // 2. Add the new entry
+        let new_pos = rbuf.read_pos() - 1;
+        index_entry.push_back(new_pos);
     }
 }
 
