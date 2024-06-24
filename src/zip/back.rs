@@ -109,20 +109,24 @@ impl Deserialize for Symbol {
 
 struct Encoder<I> {
     history: IndexedHistory,
-    input:   Buffered<I, u8>
+    input:   Buffered<I, u8>,
+    rep_buf: Vec<u8>
 }
 
 impl<I> Encoder<I> {
     fn new(input: I) -> Self {
         Encoder {
             history: IndexedHistory::new(),
-            input:   Buffered::new(input)
+            input:   Buffered::new(input),
+            rep_buf: Vec::with_capacity(REP_BUF_INIT)
         }
     }
 }
 
 // TODO explain
 const MIN_REP: usize = 6;
+
+const REP_BUF_INIT: usize = 16;
 
 impl<I: Iterator<Item = u8>> Encoder<I> {
     fn next_symbols(&mut self, channel: &mut Vec<Symbol>) {
@@ -201,19 +205,59 @@ impl<I: Iterator<Item = u8>> Encoder<I> {
     }
 
     fn next_repetition(&mut self) -> Option<LookBack> {
-        let mut checkpoint = Buffered::new(&mut self.input);
+        let more_data = |enc: &mut Encoder<I>| {
+            enc.rep_buf.extend((&mut enc.input).take(enc.rep_buf.capacity()));
+        };
+
+        // Note: this buffering is an attempt at getting faster
+        // Reading from the queue in `Buffered` seems rather slow
+        self.rep_buf.clear();
+        more_data(self);
+        // Important: don't restore the input here
+        // We may read the following bytes in this same function
+
+        loop {
+            match self.buffered_repetition() {
+                Some(lb)
+                    if lb.len == self.rep_buf.len() =>
+                {
+                    // All the bytes in the buffered input have been used
+                    // Maybe the repetition could be longer
+                    // Extend the input and try again
+                    let prev_len = self.rep_buf.len();
+                    more_data(self);
+                    println!("Buffered extra data from {} to {}", prev_len, self.rep_buf.capacity());
+                    if self.rep_buf.len() == prev_len {
+                        // Could not add any bytes to the buffered input:
+                        // end of the stream
+                        return Some(lb);
+                    }
+                    else {
+                        // rep_buf was successfully extended
+                        // Try again
+                        continue;
+                    }
+                }
+                res@_ => return res,
+            }
+        }
+    }
+
+    fn buffered_repetition(&mut self) -> Option<LookBack> {
+        if self.rep_buf.len() < MIN_REP {
+            return None;
+        }
         let prefix =
-            (&mut checkpoint).take(MIN_REP)
-                            .collect::<Vec<_>>()
-                            .try_into()
-                            .ok()?;
-        checkpoint.restore();
+            <&[u8] as TryInto<&Key>>::try_into(&self.rep_buf[0..MIN_REP])
+                .unwrap()
+                .clone();
 
         let mut max_rep_len = 0;
         let mut max_rep_back = 0;
         for (lookback, subseq) in self.history.subseqs_starting(&prefix) {
+            let input_iter = self.rep_buf.iter().cloned();
             let rep_len =
-                (&mut checkpoint).zip(subseq)
+                input_iter.zip(subseq)
                     .take_while(|(a, b)| a == b)
                     .count();
 
@@ -221,7 +265,6 @@ impl<I: Iterator<Item = u8>> Encoder<I> {
                 max_rep_len = rep_len;
                 max_rep_back = lookback;
             }
-            checkpoint.restore();
         }
         Some(LookBack { len: max_rep_len, back: max_rep_back })
     }
