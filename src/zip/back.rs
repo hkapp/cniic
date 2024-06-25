@@ -79,6 +79,7 @@ impl Serialize for Symbol {
                 Self::compress_len(*len, Self::ENUM_CODE_LOOKBACK)
                     .serialize(writer)?;
 
+                assert!(*back <= Back::MAX as usize, "{}", *back);
                 (*back as Back).serialize(writer)?;
             }
         }
@@ -279,7 +280,9 @@ impl<I: Iterator<Item = u8>> Encoder<I> {
     }
 }
 
-const MAX_RING_BUFFER_SIZE: usize = (Back::MAX as usize) + 1;
+// Note: this is not a power of two
+// However, it does ensure that our 'back' values always fit in u16
+const MAX_RING_BUFFER_SIZE: usize = Back::MAX as usize;
 type PlainHistory = RingBuffer<u8, MAX_RING_BUFFER_SIZE>;
 
 struct IndexedHistory {
