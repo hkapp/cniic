@@ -1,18 +1,15 @@
-import sys
 import os
-import glob
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-
-csv_folder = 'output/'
+import cniic
 
 # Split the files according to codec
 # This allows making separate data series for the scatter plot
 
 data_series = dict()
 
-for csv_path in glob.glob(csv_folder + "*.csv"):
+for csv_path in cniic.diagram_csvs():
     # Retrieve the codec name between the last '/' and the first '_'
     file_name = os.path.split(csv_path)[1]
     display_name = os.path.splitext(file_name)[0]
@@ -65,5 +62,5 @@ plt.ylim(-1, 10000)
 
 plt.legend()
 
-plt.savefig("output/error_vs_compression.png")
+plt.savefig(os.path.join(cniic.output_folder(), "error_vs_compression.png"))
 plt.show()

@@ -48,11 +48,14 @@ lossless_status.png: $(LOSSLESS_DIAGRAM)
 lossy_status.png: $(LOSSY_DIAGRAM)
 	cp $(LOSSY_DIAGRAM) lossy_status.png
 
-$(LOSSLESS_DIAGRAM): $(LOSSLESS_CODECS) boxplot.py
-	python3 boxplot.py
+PYTHON3 = PYTHONPATH="$(PYTHONPATH):scripts/" python3
+SCRIPTS_LOC = scripts/diagrams
 
-$(LOSSY_DIAGRAM): $(LOSSLESS_CODECS) $(LOSSY_CODECS) error_vs_compression_plot.py
-	python3 error_vs_compression_plot.py
+$(LOSSLESS_DIAGRAM): $(LOSSLESS_CODECS) $(SCRIPTS_LOC)/boxplot.py
+	$(PYTHON3) $(SCRIPTS_LOC)/boxplot.py
+
+$(LOSSY_DIAGRAM): $(LOSSLESS_CODECS) $(LOSSY_CODECS) $(SCRIPTS_LOC)/error_vs_compression_plot.py
+	$(PYTHON3) $(SCRIPTS_LOC)/error_vs_compression_plot.py
 
 $(HUFMAN):
 	$(CARGO_RUN) --codec=hufman $(DATASET)
