@@ -43,7 +43,7 @@ pub fn measure_all<I, P, T>(codec: &T, paths: I) -> io::Result<()>
             let compression_ratio = (compressed_size as f64) / (raw_size as f64);
 
             let decoded = codec.decode(&mut data.into_iter())
-                                .ok_or_else(|| String::from("Could not decode the image"))?;
+                                .ok_or_else(|| format!("Could not decode the image ({:?})", p))?;
 
             let error = compute_error(&img, &decoded);
 

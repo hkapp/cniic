@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use image::{GenericImageView, Pixel};
 
-use crate::{prs, ser::{Deserialize, SerStream}, zip::{zip_dict_decode, zip_dict_encode}};
+use crate::{prs, ser::{Deserialize, SerStream}, zip::{zip_dict_decode, zip_dict_encode, zip_back_decode, zip_back_encode}};
 
 use super::Codec;
 
@@ -13,33 +13,37 @@ pub enum Zip {
 
 impl Codec for Zip {
     fn encode<W: std::io::Write>(&self, img: &super::Img, writer: &mut W) -> std::io::Result<()> {
-        match self {
-            Zip::Dict => {
-                let bytes =
-                    SerStream::from_value(img.dimensions())
-                        .chain(SerStream::from_iter(img.pixels()
-                                    .map(|(_, _, rgba)| rgba.to_rgb())));
+        let bytes =
+            SerStream::from_value(img.dimensions())
+                .chain(SerStream::from_iter(img.pixels()
+                            .map(|(_, _, rgba)| rgba.to_rgb())));
 
-                zip_dict_encode(bytes, writer)
-            },
-            _ => todo!()
+        match self {
+            Zip::Dict => zip_dict_encode(bytes, writer),
+            Zip::Back => zip_back_encode(bytes, writer),
         }
     }
 
     fn decode<I: Iterator<Item = u8>>(&self, reader: &mut I) -> Option<super::Img> {
+        fn rebuild_image<I: Iterator<Item = u8>>(mut decoded_bytes: I) -> Option<super::Img> {
+            let dims: (u32, u32) = Deserialize::deserialize(&mut decoded_bytes)?;
+            let mut img = image::RgbImage::new(dims.0, dims.1);
+
+            for px in img.pixels_mut() {
+                *px = Deserialize::deserialize(&mut decoded_bytes)?;
+            }
+            Some(img.into())
+        }
+
         match self {
             Zip::Dict => {
-                let mut zip_decoded_bytes = zip_dict_decode(reader);
-
-                let dims: (u32, u32) = Deserialize::deserialize(&mut zip_decoded_bytes)?;
-                let mut img = image::RgbImage::new(dims.0, dims.1);
-
-                for px in img.pixels_mut() {
-                    *px = Deserialize::deserialize(&mut zip_decoded_bytes)?;
-                }
-                Some(img.into())
+                let zip_decoded_bytes = zip_dict_decode(reader);
+                rebuild_image(zip_decoded_bytes)
             }
-            _ => todo!(),
+            Zip::Back => {
+                let zip_decoded_bytes = zip_back_decode(reader);
+                rebuild_image(zip_decoded_bytes)
+            }
         }
     }
 

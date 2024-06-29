@@ -22,6 +22,7 @@ Legend:
 * `png`: The lossless PNG codec with default parameters
 * `Hufman`: Hufman-coding the pixel colors
 * `zip-dict`: Zip-inspired online dictionary building
+* `zip-back`: Zip-inspired lookback compression
 
 #### Lossy codecs
 
@@ -37,6 +38,7 @@ Legend:
 * `voronoi`: cluster the pixels using K-means (position + color). Store only the clusters and reconstruct the image as a Voronoi diagram.
   * results are shown for 64 centroids (left), 128, 256, 512, 1024 and 2048 (right)
 * `zip-dict`: Zip-inspired online dictionary building
+* `zip-back`: Zip-inspired lookback compression
 
 ### ASCII art codec descriptions
 
@@ -53,4 +55,23 @@ input:  0x01   0x02   0x01 0x02 0x01 0x02        0x0001 -> 0x01
 output: 0x0001 0x0002   0x0100 0x0100      :     0x0101 -> 0x0100 0x0100
         ^^^^^^^^^^^^^    ^ ^ ^ ^ ^ ^       :                ^ ^ ^ ^ ^ ^
               +............................+             = 0x01 0x02 0x01 0x02
+```
+
+#### zip-back
+
+```
+                           .................................
+                           v v v v                         :
+                                                           :
+                                .................          :
+                                v v v v         :          :
+                  input:  0x01 0x01 0x02 0x02  0x01 0x02  0x01 0x01
+                         [^^^^^^^^^^^^^^^^^^^][^^^^^^^^^][^^^^^^^^^]
+output:                      |                  |           |
+  1. Write the sequence:  ---+                  |           |
+     0x01 0x01 0x02 0x02                        |           |
+  2. Go back 3 bytes      ----------------------+           |
+     Copy 2 bytes                                           |
+  3. Go back 6 bytes      ----------------------------------+
+     Copy 2 bytes
 ```
