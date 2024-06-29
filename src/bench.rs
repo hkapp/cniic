@@ -49,9 +49,7 @@ pub fn measure_all<I, P, T>(codec: &T, paths: I) -> io::Result<()>
 
             if error != 0.0 {
                 // Write the incorrect image to file
-                let mut path = PathBuf::from("output");
-                path.push(p.file_name().unwrap());
-                path.set_extension("png");
+                let path = crate::under_output(&p, "png");
                 decoded.save(&path)
                         .map_err(|e| format!("{:?}", e))?;
                 eprintln!("Saved to {}", path.display());

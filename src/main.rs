@@ -3,6 +3,7 @@ mod bit;
 mod codec;
 mod geom;
 mod huf;
+mod hilbert;
 mod kmeans;
 mod prs;
 mod ser;
@@ -10,24 +11,67 @@ mod utils;
 mod zip;
 
 use codec::AnyCodec;
-use std::str::FromStr;
+use image::Pixel;
+use std::{path::{Path, PathBuf}, str::FromStr};
 
 fn main() {
-    let (codec, file_paths) = parse_args().unwrap();
+    try_special()
+        .or_else(|_|try_bench())
+        .unwrap()
+}
+
+fn try_special() -> Result<(), Err> {
+    fn retrieve_command(argument: &str) -> Result<&str, Err> {
+        argument.strip_prefix("--special=")
+                .ok_or_else(usage)
+    }
+
+    let (command, file_paths) = separate_args()?;
+    match retrieve_command(&command)? {
+        "hilbert" => {
+            file_paths
+                .for_each(|img_path| {
+                    let output_path = under_output(&img_path, "hilbert.csv");
+                    let mut csv = csv::Writer::from_path(&output_path).unwrap();
+                    csv.write_record(&["red", "blue", "green"]).unwrap();
+
+                    let img = image::open(&img_path).unwrap();
+                    hilbert::linearize(&img)
+                        .for_each(|px| csv.serialize(px.to_rgb().0).unwrap());
+                })
+        }
+        s@_ => {
+            return Err(format!("Invalid special command: {:?}", s));
+        }
+    }
+    Ok(())
+}
+
+fn try_bench() -> Result<(), Err> {
+    fn parse_codec(input: &str) -> Result<AnyCodec, Err> {
+        let codec_str = input.strip_prefix("--codec=")
+                            .ok_or_else(usage)?;
+
+        AnyCodec::from_str(codec_str)
+            .map_err(|e| format!("Malformed codec argument\n{:?}", e))
+    }
+
+    let (command, file_paths) = separate_args()?;
+    let codec = parse_codec(&command)?;
     bench::measure_all(&codec, file_paths).unwrap();
+    Ok(())
 }
 
 type Err = String;
 
-fn parse_args() -> Result<(AnyCodec, impl Iterator<Item=String>), Err> {
+fn separate_args() -> Result<(String, impl Iterator<Item=String>), Err> {
     // Note: Bash performs '*' expansion, so we always get a list here
     let mut args = std::env::args().skip(1);
 
-    let codec = args.next()
-                    .ok_or_else(usage)
-                    .and_then(|s| parse_codec(&s))?;
+    let command = args.next()
+                    .ok_or_else(usage)?;
 
-    Ok((codec, args))
+    Ok((command, args))
 }
 
 fn usage() -> String {
@@ -37,10 +81,9 @@ Available codecs:
   reduce-colors(<ncolors>)")
 }
 
-fn parse_codec(input: &str) -> Result<AnyCodec, Err> {
-    let codec_str = input.strip_prefix("--codec=")
-                        .ok_or_else(usage)?;
-
-    AnyCodec::from_str(codec_str)
-        .map_err(|e| format!("Malformed codec argument\n{:?}", e))
+fn under_output<P: AsRef<Path>>(p: &P, new_extension: &str) -> PathBuf {
+    let mut path = PathBuf::from("output");
+    path.push(p.as_ref().file_name().unwrap());
+    path.set_extension(new_extension);
+    return path;
 }
