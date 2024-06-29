@@ -124,7 +124,22 @@ impl<I> Encoder<I> {
     }
 }
 
-// TODO explain
+/** The minimum number of repetition that makes [Symbol::LookBack] better than
+    [Symbol::Explicit].
+
+    This value is derived as follows:
+    * We want the want the sequence of `a` explicit bytes followed by
+      `b` lookback bytes to get _some_ compression
+    * The original stream has length `a + b`
+    * The compressed stream has length
+      `(a + size_of(Len)) + (size_of(Len) + size_of(Back)) = a + 6` (currently)
+    * We want `a + b >= a + 6 <=> b >= 6`
+      * Note that when we reach the exact same length as the input stream, we
+        still want to use lookback
+      * This is due to the fact that the corresponding explicit sequence will
+        always have an overhead of `size_of(Len)` bytes, which will always
+        make it worse than the original stream
+  */
 const MIN_REP: usize = 6;
 
 const REP_BUF_INIT: usize = 16;
@@ -172,29 +187,20 @@ impl<I: Iterator<Item = u8>> Encoder<I> {
 
         loop {
             match self.next_repetition() {
-                Some(lb@LookBack { len: rep_len, .. }) => {
-                    // TODO explain that '>=' is better than '>'
-                    if rep_len >= MIN_REP {
-                        // Repetition is useful because long enough
-                        // Push the current explicit symbol
-                        // and the new repetition
-                        push_explicit(curr_explicit, channel);
-                        push_lookback(self, lb, channel);
-                        return;
-                    }
-                    else {
-                        // Repetition is too short
-                        // Extend the current explicit
-                        let must_return = extend_explicit(self, &mut curr_explicit);
-                        if must_return {
-                            push_explicit(curr_explicit, channel);
-                            return;
-                        }
-                    }
+                Some(lb@LookBack { len: rep_len, .. })
+                if rep_len >= MIN_REP => {
+                    // Repetition is useful because long enough
+                    // Push the current explicit symbol
+                    // and the new repetition
+                    // See the documentation of MIN_REP for an explanation of why
+                    // we use '>=' instead of '>' in the condition
+                    push_explicit(curr_explicit, channel);
+                    push_lookback(self, lb, channel);
+                    return;
                 }
-                None => {
-                    // No repetition: extend the current explicit
-                    // TODO consider using a goto or conditional guard on the match arm to share the code with above
+                _ => {
+                    // Either no repetition or the repetition is too short
+                    // Extend the current explicit
                     let must_return = extend_explicit(self, &mut curr_explicit);
                     if must_return {
                         push_explicit(curr_explicit, channel);
@@ -304,6 +310,7 @@ impl IndexedHistory {
                 .start_indices_for(prefix, &self.data)
                 .count();
         print!("?{} ", valid_entries);
+        // The following code is disabled for performance reasons:
         // let byte_count =
         //     self.data
         //         .iter()
@@ -316,7 +323,6 @@ impl IndexedHistory {
             .start_indices_for(prefix, &self.data)
             .map(|starting_index| {
                 let subseq = self.data.iter_starting(starting_index);
-                // TODO assert that the overlap is at least one in the caller
                 let lookback = self.data.lookback_value(starting_index);
                 (lookback, subseq.cloned())
             })
@@ -387,6 +393,7 @@ impl<T, const N: usize> RingBuffer<T, N> {
     }
 
     /// How many values are currently stored in this ring buffer
+    ///
     /// WARNING this is independent from e.g. [Self::read_pos]
     fn len(&self) -> usize {
         if self.wrapped_around() {
@@ -481,13 +488,22 @@ impl<T: Copy, const N: usize> RingBuffer<T, N> {
 
 /* Index */
 
+// The index is composed of two hash-maps mapping prefixes of MIN_REP bytes to
+// where these MIN_REP bytes sequences appear in the PlainHistory.
+// We use two hash-maps for maintenance purposes:
+//   Insertion of new data is performed in the `new` hash map
+//   Lookups are performed in both
+//   When the RingBuffer loops around, we are guaranteed that none of the indices in
+//   the `old` hash-map are still valid, so we can safely drop it and swap both pointers
+// As the key is a sequence of bytes, and the input is only consumed one byte at
+// a time, we need to have some "staging area" for the incomplete byte sequences
+// we're seeing. This is represented by the `incomplete` field
 struct Index {
     old:        Box<HashMap<Key, Vec<usize>>>,
     new:        Box<HashMap<Key, Vec<usize>>>,
     incomplete: VecDeque<(usize, Vec<u8>)>
 }
 
-// TODO explain
 type Key = [u8; MIN_REP];
 
 impl Index {
