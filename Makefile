@@ -23,20 +23,22 @@ LOSSY_DIAGRAM = output/error_vs_compression.png
 TRACKED_DIAGRAMS = lossy_status.png lossless_status.png
 
 CODEC_DEPS = src/bench.rs
-CARGO_RUN = cargo run --release --
+CARGO_RUN = time cargo run --release --
 DATASET = data/DIV2K_valid_HR/*
 
-LOSSLESS_CODECS = $(HUFMAN) $(ZIP)
+LOSSLESS_CODECS = $(HUFMAN) $(ZIP_DICT) $(ZIP_BACK_CP)
 HUFMAN = output/Hufman.csv
-ZIP = output/zip-dict.csv
+ZIP_DICT = output/zip-dict.csv
+# Slow codec: use '.cp' file (see rules below)
+ZIP_BACK_ROOT = output/zip-back.csv
+ZIP_BACK_CP = $(ZIP_BACK_ROOT).cp
 
-LOSSY_CODECS =
-# the following codecs are too slow to recompute every time:
-# $(CLUSTER_COLORS) $(VORONOI)
-CLUSTER_COLORS = output/cluster-colors_16.csv output/cluster-colors_32.csv output/cluster-colors_64.csv \
-	output/cluster-colors_128.csv output/cluster-colors_256.csv
-VORONOI = output/voronoi_64.csv	output/voronoi_128.csv output/voronoi_256.csv output/voronoi_512.csv \
-	output/voronoi_1024.csv output/voronoi_2048.csv
+LOSSY_CODECS = $(CLUSTER_COLORS) $(VORONOI)
+# Slow codecs: use '.cp' files (see rules below)
+CLUSTER_COLORS = output/cluster-colors_16.csv.cp output/cluster-colors_32.csv.cp output/cluster-colors_64.csv.cp \
+	output/cluster-colors_128.csv.cp output/cluster-colors_256.csv.cp
+VORONOI = output/voronoi_64.csv.cp	output/voronoi_128.csv.cp output/voronoi_256.csv.cp output/voronoi_512.csv.cp \
+	output/voronoi_1024.csv.cp output/voronoi_2048.csv.cp
 
 diagrams: $(TRACKED_DIAGRAMS)
 
@@ -52,14 +54,27 @@ $(LOSSLESS_DIAGRAM): $(LOSSLESS_CODECS) boxplot.py
 $(LOSSY_DIAGRAM): $(LOSSLESS_CODECS) $(LOSSY_CODECS) error_vs_compression_plot.py
 	python3 error_vs_compression_plot.py
 
-$(HUFMAN): $(CODEC_DEPS) src/huf.rs src/codec/hufc.rs
+$(HUFMAN):
 	$(CARGO_RUN) --codec=hufman $(DATASET)
 
-output/cluster-colors_%.csv: $(CODEC_DEPS) src/kmeans.rs src/codec/clusterc.rs
+# For codecs that are too slow to compute, we simply keep a bak file locally
+# and copy it if the original gets overwritten (e.g. via prepare_challenge.sh)
+# The codecs that use this must provide a '.bak' rule WITHOUT dependencies on the base file
+output/%.cp: output/%.bak
+	cp output/$*.bak output/$*
+	touch output/$*.cp
+
+output/cluster-colors_%.csv.bak:
 	$(CARGO_RUN) --codec="cluster-colors($*)" $(DATASET)
+	cp output/cluster-colors_$*.csv output/cluster-colors_$*.csv.bak
 
-output/voronoi_%.csv: $(CODEC_DEPS) src/kmeans.rs src/codec/clusterc.rs
+output/voronoi_%.csv.bak:
 	$(CARGO_RUN) --codec="voronoi($*)" $(DATASET)
+	cp output/voronoi_$*.csv output/cluster-colors_$*.csv.bak
 
-$(ZIP): $(CODEC_DEPS) src/zip.rs src/codec/zipc.rs
+$(ZIP_DICT):
 	$(CARGO_RUN) --codec="zip(dict)" $(DATASET)
+
+$(ZIP_BACK_ROOT).bak:
+	$(CARGO_RUN) --codec="zip(back)" $(DATASET)
+	cp $(ZIP_BACK_ROOT) $(ZIP_BACK_ROOT).bak
