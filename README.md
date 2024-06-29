@@ -22,6 +22,7 @@ Legend:
 * `png`: The lossless PNG codec with default parameters
 * `Hufman`: Hufman-coding the pixel colors
 * `zip-dict`: Zip-inspired online dictionary building
+* `zip-back`: Zip-inspired lookback compression
 
 #### Lossy codecs
 
@@ -37,6 +38,7 @@ Legend:
 * `voronoi`: cluster the pixels using K-means (position + color). Store only the clusters and reconstruct the image as a Voronoi diagram.
   * results are shown for 64 centroids (left), 128, 256, 512, 1024 and 2048 (right)
 * `zip-dict`: Zip-inspired online dictionary building
+* `zip-back`: Zip-inspired lookback compression
 
 ### ASCII art codec descriptions
 
