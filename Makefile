@@ -26,12 +26,13 @@ CODEC_DEPS = src/bench.rs
 CARGO_RUN = time cargo run --release --
 DATASET = data/DIV2K_valid_HR/*
 
-LOSSLESS_CODECS = $(HUFMAN) $(ZIP_DICT) $(ZIP_BACK_CP)
+LOSSLESS_CODECS = $(HUFMAN) $(ZIP_DICT) $(ZIP_BACK_CP) $(HILBERT)
 HUFMAN = output/Hufman.csv
 ZIP_DICT = output/zip-dict.csv
 # Slow codec: use '.cp' file (see rules below)
 ZIP_BACK_ROOT = output/zip-back.csv
 ZIP_BACK_CP = $(ZIP_BACK_ROOT).cp
+HILBERT = output/hilbert-rle.csv
 
 LOSSY_CODECS = $(CLUSTER_COLORS) $(VORONOI)
 # Slow codecs: use '.cp' files (see rules below)
@@ -81,3 +82,6 @@ $(ZIP_DICT):
 $(ZIP_BACK_ROOT).bak:
 	$(CARGO_RUN) --codec="zip(back)" $(DATASET)
 	cp $(ZIP_BACK_ROOT) $(ZIP_BACK_ROOT).bak
+
+$(HILBERT):
+	$(CARGO_RUN) --codec="hilbert(rle)" $(DATASET)
