@@ -37,7 +37,7 @@ fn from_matrix<T: Matrix>(data: &T) -> impl Iterator<Item = T::Item> + '_ {
         .map(|(x, y)| data.get(x, y))
 }
 
-fn iter(xdim: usize, ydim: usize) -> impl Iterator<Item = (usize, usize)> {
+pub fn iter(xdim: usize, ydim: usize) -> impl Iterator<Item = (usize, usize)> {
     ArbHilbertScan32::new([xdim.try_into().unwrap(), ydim.try_into().unwrap()])
         .map(|arr| (arr[0] as usize, arr[1] as usize))
 }

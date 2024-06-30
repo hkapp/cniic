@@ -1,4 +1,5 @@
 mod clusterc;
+mod hilbertc;
 mod hufc;
 mod zipc;
 
@@ -113,8 +114,9 @@ macro_rules! gen_all {
 }
 
 gen_all!(
-    hufc, Hufman;
     clusterc, ClusterColors;
     clusterc, VoronoiCluster;
+    hilbertc, Hilbert;
+    hufc, Hufman;
     zipc, Zip
 );
