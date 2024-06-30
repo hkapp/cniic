@@ -11,7 +11,7 @@ mod utils;
 mod zip;
 
 use codec::AnyCodec;
-use image::Pixel;
+use image::{Pixel, Rgba};
 use std::{path::{Path, PathBuf}, str::FromStr};
 
 fn main() {
@@ -31,13 +31,20 @@ fn try_special() -> Result<(), Err> {
         "hilbert" => {
             file_paths
                 .for_each(|img_path| {
-                    let output_path = under_output(&img_path, "hilbert.csv");
-                    let mut csv = csv::Writer::from_path(&output_path).unwrap();
-                    csv.write_record(&["red", "blue", "green"]).unwrap();
+                    fn write_to_csv<I: Iterator<Item = Rgba<u8>>>(iter: I, img_path: &str, meth_name: &str) {
+                        let file_suffix = format!("{}.hilbert.csv", meth_name);
+                        let output_path = under_output(&img_path, &file_suffix);
+                        let mut csv = csv::Writer::from_path(&output_path).unwrap();
+                        csv.write_record(&["red", "blue", "green"]).unwrap();
+
+                        iter.for_each(|px| csv.serialize(px.to_rgb().0).unwrap());
+                    }
 
                     let img = image::open(&img_path).unwrap();
-                    hilbert::linearize(&img)
-                        .for_each(|px| csv.serialize(px.to_rgb().0).unwrap());
+
+                    write_to_csv(hilbert::linearize_rect(&img), &img_path, "rect");
+                    write_to_csv(hilbert::linearize_small(&img), &img_path, "small");
+                    write_to_csv(hilbert::linearize_large(&img), &img_path, "large");
                 })
         }
         s@_ => {
