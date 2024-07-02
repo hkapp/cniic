@@ -1,7 +1,8 @@
 use regex::Regex;
 
 pub fn matches_fully<'a>(input: &'a str, regex: &str) -> Option<&'a str> {
-    let regexp = Regex::new(regex).unwrap();
+    let full_string_regex = format!("^{}$", regex);
+    let regexp = Regex::new(&full_string_regex).unwrap();
     let matches = regexp.captures(input)?;
 
     // We expect one capture group for the entire match
@@ -153,6 +154,26 @@ pub fn fun_call(input: &str) -> Option<(&str, Vec<&str>)> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn fully0() {
+        assert_eq!(matches_fully("", "a"), None)
+    }
+
+    #[test]
+    fn fully1a() {
+        assert_eq!(matches_fully("a", "a"), Some("a"))
+    }
+
+    #[test]
+    fn fully1b() {
+        assert_eq!(matches_fully("a", "b"), None)
+    }
+
+    #[test]
+    fn fully2() {
+        assert_eq!(matches_fully("aa", "a"), None)
+    }
 
     fn test_fun_call_success(input: &str, expected_name: &str, expected_args: Vec<&str>) {
         assert_eq!(fun_call(input), Some((expected_name, expected_args)));

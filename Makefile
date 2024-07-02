@@ -34,12 +34,14 @@ ZIP_BACK_ROOT = output/zip-back.csv
 ZIP_BACK_CP = $(ZIP_BACK_ROOT).cp
 HILBERT = output/hilbert-rle.csv
 
-LOSSY_CODECS = $(CLUSTER_COLORS) $(VORONOI)
+LOSSY_CODECS = $(CLUSTER_COLORS) $(VORONOI) $(HILBERT_APPROX)
 # Slow codecs: use '.cp' files (see rules below)
 CLUSTER_COLORS = output/cluster-colors_16.csv.cp output/cluster-colors_32.csv.cp output/cluster-colors_64.csv.cp \
 	output/cluster-colors_128.csv.cp output/cluster-colors_256.csv.cp
 VORONOI = output/voronoi_64.csv.cp	output/voronoi_128.csv.cp output/voronoi_256.csv.cp output/voronoi_512.csv.cp \
 	output/voronoi_1024.csv.cp output/voronoi_2048.csv.cp
+HILBERT_APPROX = output/hilbert-rle-approx_1.csv output/hilbert-rle-approx_2.csv output/hilbert-rle-approx_4.csv \
+	 output/hilbert-rle-approx_8.csv output/hilbert-rle-approx_16.csv
 
 diagrams: $(TRACKED_DIAGRAMS)
 
@@ -85,3 +87,6 @@ $(ZIP_BACK_ROOT).bak:
 
 $(HILBERT):
 	$(CARGO_RUN) --codec="hilbert(rle)" $(DATASET)
+
+output/hilbert-rle-approx_%.csv:
+	$(CARGO_RUN) --codec="hilbert(rle($*))" $(DATASET)
