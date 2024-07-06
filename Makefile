@@ -66,7 +66,7 @@ $(HUFMAN):
 # For codecs that are too slow to compute, we simply keep a bak file locally
 # and copy it if the original gets overwritten (e.g. via prepare_challenge.sh)
 # The codecs that use this must provide a '.bak' rule WITHOUT dependencies on the base file
-output/%.cp: output/%.bak
+output/%.cp: output/%.bak output/%
 	cp output/$*.bak output/$*
 	touch output/$*.cp
 
