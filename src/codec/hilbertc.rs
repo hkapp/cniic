@@ -236,7 +236,7 @@ impl RunningAvg {
         let color_f64 = self.avg_f64();
         let safe_convert = |x: f64| {
             assert!(x <= u8::MAX as f64, "{}", x);
-            x as u8
+            x.round() as u8
         };
         let color_u8 = Rgb(color_f64.map(safe_convert));
         // print!(" = {:?}", &color_u8);
