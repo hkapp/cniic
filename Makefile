@@ -32,7 +32,7 @@ ZIP_DICT = output/zip-dict.csv
 # Slow codec: use '.cp' file (see rules below)
 ZIP_BACK_ROOT = output/zip-back.csv
 ZIP_BACK_CP = $(ZIP_BACK_ROOT).cp
-HILBERT = output/hilbert-rle.csv
+HILBERT = output/hilbert-rle.csv output/hilbert-zip.csv
 
 LOSSY_CODECS = $(CLUSTER_COLORS) $(VORONOI) $(HILBERT_APPROX)
 # Slow codecs: use '.cp' files (see rules below)
@@ -85,8 +85,11 @@ $(ZIP_BACK_ROOT).bak:
 	$(CARGO_RUN) --codec="zip(back)" $(DATASET)
 	cp $(ZIP_BACK_ROOT) $(ZIP_BACK_ROOT).bak
 
-$(HILBERT):
+output/hilbert-rle.csv:
 	$(CARGO_RUN) --codec="hilbert(rle)" $(DATASET)
 
 output/hilbert-rle-approx_%.csv:
 	$(CARGO_RUN) --codec="hilbert(rle($*))" $(DATASET)
+
+output/hilbert-zip.csv:
+	$(CARGO_RUN) --codec="hilbert(zip)" $(DATASET)

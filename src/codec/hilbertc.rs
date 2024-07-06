@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use image::{GenericImageView, ImageBuffer, Pixel, Rgb};
 
-use crate::{geom::Distance, hilbert, prs, ser::{Deserialize, Serialize}};
+use crate::{geom::Distance, hilbert, prs, ser::{deser_stream, Deserialize, SerStream, Serialize}, zip::{zip_dict_decode, zip_dict_encode}};
 
 use super::Codec;
 
@@ -13,6 +13,7 @@ pub struct Hilbert {
 enum CompressionMethod {
     /// Run-Length Encoding.
     RLE(f64),
+    Zip  // We only ever use zip-dict
 }
 
 // TODO revert
@@ -40,45 +41,52 @@ impl Codec for Hilbert {
                     color.serialize(writer)?;
                 }
             },
+            CompressionMethod::Zip => {
+                zip_dict_encode(SerStream::from_iter(iter), writer)?;
+            }
         }
 
         Ok(())
     }
 
     fn decode<I: Iterator<Item = u8>>(&self, reader: &mut I) -> Option<super::Img> {
+        fn decode_any<I: Iterator<Item = Rgb<u8>>>(dimensions: (u32, u32), iter: I) -> Option<super::Img> {
+            let mut img_buffer = ImageBuffer::new(dimensions.0, dimensions.1);
+
+            hilbert::iter(dimensions.0 as usize, dimensions.1 as usize)
+                .zip(iter)
+                .for_each(|((x, y), color)|
+                    *img_buffer.get_pixel_mut(x as u32, y as u32) = color);
+
+            Some(img_buffer.into())
+        }
+
         let dimensions = <(u32, u32)>::deserialize(reader)?;
-        let mut img_buffer = ImageBuffer::new(dimensions.0, dimensions.1);
-
         match &self.compress {
-            CompressionMethod::RLE(_) => {},
-        }
-
-        let mut count = RepCount::deserialize(reader)?;
-        let mut curr_color = <Rgb<u8>>::deserialize(reader)?;
-        for (x, y) in hilbert::iter(dimensions.0 as usize, dimensions.1 as usize) {
-            if count == 0 {
-                count = RepCount::deserialize(reader)?;
-                curr_color = <Rgb<u8>>::deserialize(reader)?;
+            CompressionMethod::RLE(_) => {
+                let rle_decode = RleDecoder::new(reader);
+                decode_any(dimensions, rle_decode)
+            },
+            CompressionMethod::Zip => {
+                let mut zip_bytes = zip_dict_decode(reader);
+                let zip_colors = deser_stream(&mut zip_bytes);
+                decode_any(dimensions, zip_colors)
             }
-
-            *img_buffer.get_pixel_mut(x as u32, y as u32) = curr_color;
-
-            count -= 1;
         }
-
-        Some(img_buffer.into())
     }
 
     fn name(&self) -> String {
         match &self.compress {
             CompressionMethod::RLE(d) if *d == 0.0 => String::from("hilbert-rle"),
             CompressionMethod::RLE(d) => format!("hilbert-rle-approx_{}", d),
+            CompressionMethod::Zip => String::from("hilbert-zip"),
         }
     }
 
     fn is_lossless(&self) -> bool {
         match &self.compress {
             CompressionMethod::RLE(d) => *d == 0.0,
+            CompressionMethod::Zip => true,
         }
     }
 }
@@ -251,6 +259,39 @@ impl Distance for [f64; CHANNEL_COUNT] {
     }
 }
 
+/* RleDecoder */
+
+struct RleDecoder<I> {
+    bytes:      I,
+    curr_color: Rgb<u8>,
+    count:      RepCount
+}
+
+impl<I> RleDecoder<I> {
+    fn new(iter: I) -> Self {
+        RleDecoder {
+            bytes:      iter,
+            curr_color: Rgb(Default::default()),
+            count:      0
+        }
+    }
+}
+
+impl<I: Iterator<Item = u8>> Iterator for RleDecoder<I> {
+    type Item = Rgb<u8>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.count == 0 {
+            self.count = RepCount::deserialize(&mut self.bytes)?;
+            assert!(self.count > 0);
+            self.curr_color = <Rgb<u8>>::deserialize(&mut self.bytes).unwrap();
+        }
+
+        self.count -= 1;
+        Some(self.curr_color)
+    }
+}
+
 /* Arg parser */
 
 impl FromStr for Hilbert {
@@ -266,27 +307,47 @@ impl FromStr for Hilbert {
             return Err(format!("Wrong number of arguments for hilbert: expected 1, found {}", args.len()));
         }
 
-        let rle_err =
-            if prs::matches_fully(args[0], "rle").is_some() {
-                // hilbert(rle)
-                0.0
-            }
-            else {
-                // hilbert(rle(<d>))
-                let (rle, rle_args) = prs::fun_call(args[0])
-                                        .ok_or_else(|| format!("Can't parse {:?} as a function", args[0]))?;
+        Ok(Hilbert { compress: CompressionMethod::from_str(args[0])? })
+    }
+}
 
-                let _ = prs::matches_fully(rle, "rle")
-                            .ok_or_else(|| format!("Argument to Hilbert must be rle, found {:?}", rle))?;
-                if rle_args.len() > 1 {
-                    return Err(format!("Wrong number of arguments for rle: expected 1, found {}", args.len()));
+impl FromStr for CompressionMethod {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parse_rle = || {
+            let rle_err =
+                if prs::matches_fully(s, "rle").is_some() {
+                    // hilbert(rle)
+                    0.0
                 }
-                assert_ne!(rle_args.len(), 0);
+                else {
+                    // hilbert(rle(<d>))
+                    let (rle, rle_args) = prs::fun_call(s)
+                                            .ok_or_else(|| format!("Can't parse {:?} as a function", s))?;
 
-                f64::from_str(rle_args.first().unwrap())
-                    .map_err(|e| format!("{:?}", e))?
-            };
+                    let _ = prs::matches_fully(rle, "rle")
+                                .ok_or_else(|| format!("Argument to Hilbert must be rle, found {:?}", rle))?;
+                    if rle_args.len() > 1 {
+                        return Err(format!("Wrong number of arguments for rle: expected 1, found {}", rle_args.len()));
+                    }
+                    assert_ne!(rle_args.len(), 0);
 
-        Ok(Hilbert { compress: CompressionMethod::RLE(rle_err)})
+                    f64::from_str(rle_args.first().unwrap())
+                        .map_err(|e| format!("{:?}", e))?
+                };
+
+            Ok(CompressionMethod::RLE(rle_err))
+        };
+
+        let parse_zip = || {
+            match prs::matches_fully(s, "zip") {
+                Some(_) => Ok(CompressionMethod::Zip),
+                None => Err(format!("Cannot match {:?} in {:?}", "zip", s)),
+            }
+        };
+
+        parse_rle()
+            .or_else(|_| parse_zip()) // TODO we lose the first error message here
     }
 }

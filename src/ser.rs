@@ -224,3 +224,9 @@ impl<T: Serialize, I: Iterator<Item = T>> Iterator for SerStream<I> {
             .pop_front()
     }
 }
+
+/* Utility: deser_stream */
+
+pub fn deser_stream<I: Iterator<Item = u8>, T: Deserialize>(stream: &mut I) -> impl Iterator<Item = T> + '_ {
+    iter::from_fn(|| T::deserialize(stream))
+}
