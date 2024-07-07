@@ -151,6 +151,75 @@ pub fn fun_call(input: &str) -> Option<(&str, Vec<&str>)> {
     }
 }
 
+/* ParseError */
+
+type FailedAlternatives = Vec<(&'static str, ParseError)>;
+
+#[derive(Debug)]
+pub enum ParseError {
+    WrongName { expected: String, found: String },
+    WrongNumberOfArguments { expected: usize, found: usize },
+    AllFailed(FailedAlternatives),
+    Other(String)
+}
+
+impl From<String> for ParseError {
+    fn from(value: String) -> Self {
+        ParseError::Other(value)
+    }
+}
+
+pub struct ParseAlternatives<'a, T> {
+    input: &'a str,
+    res:   Result<T, FailedAlternatives>
+}
+
+impl<'a, T> ParseAlternatives<'a, T> {
+    pub fn new(s: &'a str) -> Self {
+        ParseAlternatives {
+            input: s,
+            res:   Err(Vec::new())
+        }
+    }
+
+    pub fn then_try<F: FnOnce(&'a str) -> Result<T, ParseError>>(self, name: &'static str, prs_fun: F) -> Self {
+        match self.res {
+            Ok(_) => self,
+            Err(_) => {
+                match prs_fun(self.input) {
+                    Ok(x) => self.into_success(x),
+                    Err(e) => self.stack_error(name, e),
+                }
+            }
+        }
+    }
+
+    fn into_success(mut self, x: T) -> Self {
+        assert!(self.res.is_err());
+        self.res = Ok(x);
+        self
+    }
+
+    fn stack_error(mut self, name: &'static str, e: ParseError) -> Self {
+        assert!(self.res.is_err());
+
+        // Note: we use unsafe to avoid requiring that T implements Debug
+        let error_stack = unsafe {
+            self.res
+                .as_mut()
+                .unwrap_err_unchecked()
+        };
+
+        error_stack.push((name, e));
+        self
+    }
+
+    pub fn end(self) -> Result<T, ParseError> {
+        self.res
+            .map_err(|v| ParseError::AllFailed(v))
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

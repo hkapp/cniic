@@ -5,6 +5,7 @@ mod zipc;
 
 use std::io;
 use std::str::FromStr;
+use crate::prs::{ParseError, ParseAlternatives};
 
 pub type Img = image::DynamicImage;
 
@@ -28,27 +29,21 @@ macro_rules! gen_struct {
     };
 }
 
-type CodecFromStrErr = Vec<(String, String)>;
-
 macro_rules! gen_from_str_impl {
     ( $( $mod:ident, $codec:ident );* ) => {
         impl FromStr for AnyCodec {
-            type Err = CodecFromStrErr;
+            type Err = ParseError;
 
             fn from_str(s: &str) -> Result<Self, Self::Err> {
-                fn stack_err(mut prev_err: CodecFromStrErr, name: &str, new_err: String) -> CodecFromStrErr {
-                    prev_err.push((String::from(name), new_err));
-                    prev_err
-                }
-
-                Err(Vec::new())
+                ParseAlternatives::new(s)
                 $(
-                    .or_else(|prev_err: CodecFromStrErr| {
+                    .then_try(stringify!($codec), |s| {
                         $mod::$codec::from_str(s)
                             .map(Into::into)
-                            .map_err(|new_err| stack_err(prev_err, stringify!($codec), new_err))
+                            .map_err(Into::into)
                     })
                 )*
+                .end()
             }
         }
     };

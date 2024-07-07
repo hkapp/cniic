@@ -3,6 +3,8 @@ use image::{GenericImageView, ImageBuffer, Pixel, Rgb};
 use crate::geom::Distance;
 use crate::hilbert;
 use crate::prs;
+use crate::prs::ParseAlternatives;
+use crate::prs::ParseError;
 use crate::ser::{deser_stream, Deserialize, SerStream, Serialize};
 use crate::zip::{zip_dict_decode, zip_dict_encode};
 use super::Codec;
@@ -253,7 +255,6 @@ struct RunningAvg {
 
 impl RunningAvg {
     fn new(init_color: &Rgb<u8>) -> Self {
-        // print!("\n{:?}", init_color);
         RunningAvg {
             sum:   as_f64(init_color),
             count: 1
@@ -261,7 +262,6 @@ impl RunningAvg {
     }
 
     fn add(&mut self, x: &Rgb<u8>) {
-        // print!(" + {:?}", x);
         for i in 0..CHANNEL_COUNT {
             self.sum[i] += x.0[i] as f64;
         }
@@ -280,7 +280,6 @@ impl RunningAvg {
             x.round() as u8
         };
         let color_u8 = Rgb(color_f64.map(safe_convert));
-        // print!(" = {:?}", &color_u8);
         return color_u8;
     }
 }
@@ -336,7 +335,7 @@ impl<I: Iterator<Item = u8>> Iterator for RleDecoder<I> {
 /* Arg parser */
 
 impl FromStr for Hilbert {
-    type Err = String;
+    type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (hilbert, args) = prs::fun_call(s)
@@ -345,7 +344,7 @@ impl FromStr for Hilbert {
                     .ok_or_else(|| format!("Incorrect name: {}", hilbert))?;
 
         if args.len() != 1 {
-            return Err(format!("Wrong number of arguments for hilbert: expected 1, found {}", args.len()));
+            return Err(ParseError::WrongNumberOfArguments { expected: 1, found: args.len() });
         }
 
         Ok(Hilbert { compress: CompressionMethod::from_str(args[0])? })
@@ -353,10 +352,10 @@ impl FromStr for Hilbert {
 }
 
 impl FromStr for CompressionMethod {
-    type Err = String;
+    type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parse_rle = || {
+        let parse_rle = |s| {
             let rle_err =
                 if prs::matches_fully(s, "rle").is_some() {
                     // hilbert(rle)
@@ -368,9 +367,9 @@ impl FromStr for CompressionMethod {
                                             .ok_or_else(|| format!("Can't parse {:?} as a function", s))?;
 
                     let _ = prs::matches_fully(rle, "rle")
-                                .ok_or_else(|| format!("Argument to Hilbert must be rle, found {:?}", rle))?;
+                                .ok_or_else(|| ParseError::WrongName { expected: String::from("rle"), found: String::from(rle) })?;
                     if rle_args.len() > 1 {
-                        return Err(format!("Wrong number of arguments for rle: expected 1, found {}", rle_args.len()));
+                        return Err(ParseError::WrongNumberOfArguments { expected: 1, found: rle_args.len() });
                     }
                     assert_ne!(rle_args.len(), 0);
 
@@ -381,14 +380,16 @@ impl FromStr for CompressionMethod {
             Ok(CompressionMethod::RLE(rle_err))
         };
 
-        let parse_zip = || {
+        let parse_zip = |s| {
             match prs::matches_fully(s, "zip") {
                 Some(_) => Ok(CompressionMethod::Zip),
-                None => Err(format!("Cannot match {:?} in {:?}", "zip", s)),
+                None => Err(ParseError::WrongName { expected: String::from("zip"), found: String::from(s) }),
             }
         };
 
-        parse_rle()
-            .or_else(|_| parse_zip()) // TODO we lose the first error message here
+        ParseAlternatives::new(s)
+            .then_try("rle", parse_rle)
+            .then_try("zip", parse_zip)
+            .end()
     }
 }
