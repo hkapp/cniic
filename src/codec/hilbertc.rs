@@ -1,9 +1,10 @@
 use std::str::FromStr;
-
 use image::{GenericImageView, ImageBuffer, Pixel, Rgb};
-
-use crate::{geom::Distance, hilbert, prs, ser::{deser_stream, Deserialize, SerStream, Serialize}, zip::{zip_dict_decode, zip_dict_encode}};
-
+use crate::geom::Distance;
+use crate::hilbert;
+use crate::prs;
+use crate::ser::{deser_stream, Deserialize, SerStream, Serialize};
+use crate::zip::{zip_dict_decode, zip_dict_encode};
 use super::Codec;
 
 pub struct Hilbert {
@@ -13,10 +14,10 @@ pub struct Hilbert {
 enum CompressionMethod {
     /// Run-Length Encoding.
     RLE(f64),
-    Zip  // We only ever use zip-dict
+    // Note: We only ever use zip-dict here
+    Zip
 }
 
-// TODO revert
 type RepCount = u8;
 
 impl Codec for Hilbert {
@@ -91,114 +92,154 @@ impl Codec for Hilbert {
     }
 }
 
-/* rle_exact */
+/* AbstractRle */
 
-fn rle_exact<I: Iterator<Item = T>, T: Eq>(iter: I) -> impl Iterator<Item = (RepCount, T)> {
-    Rle::new(iter)
+struct AbstractRle<I, S, T> {
+    iter:     I,
+    criteria: S,
+    last:     Option<T>
 }
 
-struct Rle<I, T> {
-    iter: I,
-    last: Option<T>
-}
-
-impl<I, T> Rle<I, T> {
-    fn new(iter: I) -> Self {
-        Rle {
+impl<I, S, T> AbstractRle<I, S, T> {
+    fn new(iter: I, init_state: S) -> Self {
+        AbstractRle {
             iter,
-            last: None
+            criteria: init_state,
+            last:  None
         }
     }
 }
 
-impl<I: Iterator<Item=T>, T: Eq> Iterator for Rle<I, T> {
+impl<I: Iterator<Item=T>, T, S: Criteria<T>> Iterator for AbstractRle<I, S, T> {
     type Item = (RepCount, T);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let curr_val =
+        let next_val =
             self.last
                 .take()
                 .or_else(|| self.iter.next())?;
 
         let mut count = 1;
-        // TODO can we use a for loop here?
+        self.criteria.start_sequence(next_val);
+
         while let Some(x) = self.iter.next() {
-            if x == curr_val {
+            if self.criteria.accept(&x) {
                 count += 1;
                 if count == RepCount::MAX {
                     // We reached the max number of repetitions
                     // Stop early
                     println!("Max number of repetitions reached: {}", count);
-                    return Some((count, curr_val));
+                    // Note: we don't have to save the next color because
+                    // we've counted only up to the current one
+                    break;
                 }
             }
             else {
                 self.last = Some(x);
-                return Some((count, curr_val));
+                break;
             }
         }
 
-        // The underlying stream stopped
-        // We still need to output our current subsequence
-        return Some((count, curr_val));
+        // We get here either because:
+        //  * the repetition stopped
+        //  * the repetition is too long
+        //  * the underlying stream stopped
+        // Output our current subsequence
+        Some((count, self.criteria.end_repetition()))
+    }
+}
+
+trait Criteria<T> {
+    fn start_sequence(&mut self, start_val: T);
+    fn accept(&mut self, x: &T) -> bool;
+    fn end_repetition(&mut self) -> T;
+}
+
+/* rle_exact */
+
+fn rle_exact<I: Iterator<Item = T>, T: Eq>(iter: I) -> impl Iterator<Item = (RepCount, T)> {
+    AbstractRle::new(iter, Exact::new())
+}
+
+struct Exact<T> {
+    curr_val: Option<T>,
+}
+
+impl<T> Exact<T> {
+    fn new() -> Self {
+        Exact {
+            curr_val: None
+        }
+    }
+}
+
+impl<T: Eq> Criteria<T> for Exact<T> {
+    fn start_sequence(&mut self, start_val: T) {
+        self.curr_val = Some(start_val);
+    }
+
+    fn accept(&mut self, x: &T) -> bool {
+        let y =
+            self.curr_val
+                .as_ref()
+                .unwrap();
+        y == x
+    }
+
+    fn end_repetition(&mut self) -> T {
+        self.curr_val
+            .take()
+            .unwrap()
     }
 }
 
 /* rle_approx */
 
 fn rle_approx<I: Iterator<Item = Rgb<u8>>>(iter: I, d: f64) -> impl Iterator<Item = (RepCount, Rgb<u8>)> {
-    RleApprox::new(iter, d)
+    AbstractRle::new(iter, Approx::new(d))
 }
 
-struct RleApprox<I> {
-    iter:  I,
-    last:  Option<Rgb<u8>>,
-    allow: f64
+struct Approx {
+    allow: f64,
+    running_avg: Option<RunningAvg>,
 }
 
-impl<I> RleApprox<I> {
-    fn new(iter: I, allow: f64) -> Self {
-        RleApprox {
-            iter,
-            last: None,
-            allow
+impl Approx {
+    fn new(allow: f64) -> Self {
+        Approx {
+            allow,
+            running_avg: None
         }
     }
 }
 
-impl<I: Iterator<Item=Rgb<u8>>> Iterator for RleApprox<I> {
-    type Item = (RepCount, Rgb<u8>);
+impl Criteria<Rgb<u8>> for Approx {
+    fn start_sequence(&mut self, start_val: Rgb<u8>) {
+        let running_avg = RunningAvg::new(&start_val);
+        self.running_avg = Some(running_avg);
+    }
 
-    fn next(&mut self) -> Option<Self::Item> {
-        let curr_val =
-            self.last
-                .take()
-                .or_else(|| self.iter.next())?;
+    fn accept(&mut self, x: &Rgb<u8>) -> bool {
+        let running_avg =
+            self.running_avg
+                .as_mut()
+                .unwrap();
 
-        let mut running_avg = RunningAvg::new(&curr_val);
-        let mut count = 1;
-        // TODO can we use a for loop here?
-        while let Some(x) = self.iter.next() {
-            // TODO introduce an abstract RLE
-            if running_avg.avg_f64().dist(&as_f64(&x)) <= self.allow {
-                count += 1;
-                running_avg.add(&x);
-                if count == RepCount::MAX {
-                    // We reached the max number of repetitions
-                    // Stop early
-                    println!("Max number of repetitions reached: {}", count);
-                    return Some((count, running_avg.avg()));
-                }
-            }
-            else {
-                self.last = Some(x);
-                return Some((count, running_avg.avg()));
-            }
+        let curr_f64 = running_avg.avg_f64();
+        let new_f64 = as_f64(x);
+
+        let accept = curr_f64.dist(&new_f64) <= self.allow;
+        if accept {
+            running_avg.add(x);
         }
+        return accept;
+    }
 
-        // The underlying stream stopped
-        // We still need to output our current subsequence
-        return Some((count, running_avg.avg()));
+    fn end_repetition(&mut self) -> Rgb<u8> {
+        self.running_avg
+            .take()
+            .unwrap()
+            .avg()
     }
 }
 
