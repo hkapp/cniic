@@ -1,20 +1,13 @@
-use std::ops::Add;
-use std::ops::Sub;
+use std::ops::{Sub, Add};
 use std::str::FromStr;
 use image::{GenericImageView, ImageBuffer, Pixel, Rgb};
-use crate::bit::IoBitWriter;
-use crate::bit::WriteBit;
 use crate::geom::Distance;
 use crate::hilbert;
 use crate::huf;
-use crate::prs;
-use crate::prs::ParseAlternatives;
-use crate::prs::ParseError;
+use crate::prs::{self, ParseError, ParseAlternatives};
 use crate::ser::{deser_stream, Deserialize, SerStream, Serialize};
-use crate::utils;
 use crate::zip::{zip_dict_decode, zip_dict_encode};
-use super::Codec;
-use super::Img;
+use super::{Codec, Img};
 
 pub struct Hilbert {
     compress: CompressionMethod
@@ -415,45 +408,28 @@ impl Codec for Delta {
         dimensions.serialize(writer)?;
 
         // 2. Write the first color
-        let (first_color, diff_stream_) = diff_stream(img);
-        println!("encode: first_color: {:?}", first_color);
+        let (first_color, _) = diff_stream(img);
         first_color.serialize(writer)?;
 
-        // Build the Hufman encoder
-        let diff_freqs = utils::count_freqs(diff_stream_);
-        let (enc, dec) = huf::build(diff_freqs.into_iter());
-        // 3. Serialize the Hufman decoder
-        dec.serialize(writer)?;
-
-        // 4. Write the payload
-        // TODO make this into a dedicated API in `huf`
-        let mut bit_writer = IoBitWriter::new(writer, huf::BIT_ORDER);
-        for diff in diff_stream(img).1 {
-            enc.encode(&diff, &mut bit_writer).unwrap();
-        }
-        bit_writer.pad_and_flush()?;
-        Ok(())
+        // 3. Hufman encode the differences
+        huf::encode_all(|| diff_stream(img).1, writer)
     }
 
     fn decode<I: Iterator<Item = u8>>(&self, reader: &mut I) -> Option<Img> {
-        // TODO convert into an API in `super`
-        let dimensions = <(u32, u32)>::deserialize(reader)?;
-        let mut img_buffer = ImageBuffer::new(dimensions.0, dimensions.1);
-        println!("dimensions = {:?}", dimensions);
+        let (dimensions, mut img_buffer) = super::create_image_buffer_standard(reader)?;
 
+        // Read the first color
         let first_color = <Rgb<u8>>::deserialize(reader)?;
-        println!("decode: first_color: {:?}", first_color);
         let mut hilbert = hilbert::iter(dimensions.0 as usize, dimensions.1 as usize);
+
         // Write the first color
         let (x, y) = hilbert.next().unwrap();
         *img_buffer.get_pixel_mut(x as u32, y as u32) = first_color;
 
-        // TODO turn this into a `huf` API
-        let diff_stream = huf::dec_stream_easy(reader).unwrap();
+        // Follow the Hilbert traversal to reconstruct the image
+        let diff_stream = huf::decode_all(reader).unwrap();
         let color_stream = FromDiff::new(first_color, diff_stream);
-
         for ((x, y), color) in hilbert.zip(color_stream) {
-            // println!("({}, {}) -> {:?}", x, y, color);
             *img_buffer.get_pixel_mut(x as u32, y as u32) = color;
         }
 

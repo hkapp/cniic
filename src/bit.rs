@@ -201,6 +201,7 @@ impl<W> IoBitWriter<W> {
         }
     }
 
+    #[cfg(test)]
     pub fn into_inner(self) -> W {
         self.writer
     }

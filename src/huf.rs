@@ -4,62 +4,60 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, BinaryHeap};
 use std::hash::Hash;
 use std::ops::Add;
+use std::io;
+use crate::ser::{Serialize, Deserialize};
+use crate::bit::{self, bit_reader, Bit, BitArray, BitOrder, IoBitWriter, WriteBit};
+use crate::utils;
 
-use crate::bit::{bit_reader, Bit, BitArray, BitOrder};
-use crate::bit;
+/// Perform the entire Hufman encoding process.
+///
+/// This function will:
+///  1. build the Hufman dictionary
+///  2. serialize the decoder in the given `writer`
+///  3. serialize all the values coming from `new_iter`
+///
+/// Because Hufman encoding takes place in two stages, the input data must
+/// be read twice.
+/// This is why `new_iter` is a function that returns an iterator instead
+/// of an iterator.
+/// The function `new_iter` will be called exactly twice.
+pub fn encode_all<I, T, W, F>(new_iter: F, writer: &mut W) -> io::Result<()>
+    where
+        I: Iterator<Item = T>,
+        T: Eq + Hash + Clone + Serialize,
+        W: io::Write,
+        F: Fn() -> I
+{
+    // 1. Build the Hufman encoder
+    let item_freqs = utils::count_freqs(new_iter());
+    let (enc, dec) = build(item_freqs.into_iter());
 
-pub const BIT_ORDER: BitOrder = BitOrder::MsbFirst;
+    // 2. Serialize the Hufman decoder
+    dec.serialize(writer)?;
 
-/* Enc */
-
-pub struct Enc<T> {
-    codes: HashMap<T, BitArray>
-}
-
-impl<T: Hash + Eq + Clone> From<&Dec<T>> for Enc<T> {
-    fn from(enc: &Dec<T>) -> Self {
-        let mut codes = HashMap::new();
-        for (bits, symbol) in enc.trie.iter() {
-            codes.insert(symbol.clone(), BitArray::from_slice(&bits as &[Bit], BIT_ORDER));
-        }
-        Enc {
-            codes
-        }
+    // 3. Write the payload
+    let mut bit_writer = IoBitWriter::new(writer, BIT_ORDER);
+    for symbol in new_iter() {
+        enc.encode(&symbol, &mut bit_writer).unwrap();
     }
+    bit_writer.pad_and_flush()?;
+    Ok(())
 }
 
-impl<T: Hash + Eq> Enc<T> {
-    pub fn encode<W: bit::WriteBit>(&self, symbol: &T, writer: &mut W) -> Option<()> {
-        let code = self.codes.get(symbol)?;
-        if code.len() == 0 {
-            return Some(());
-        }
+/// Decodes a stream of values previously serialized by [encode_all].
+pub fn decode_all<I: Iterator<Item = u8>, T: Deserialize>(mut input: I) -> Option<DecStream<impl Iterator<Item = Bit>, T>> {
+    // We expect the decoder to have been serialized just before the data
+    let dec = <Dec<T>>::deserialize(&mut input)?;
+    let bits = bit_reader(input, BIT_ORDER);
 
-        writer.write_arr(code)
-            .map_err(|e| eprintln!("{:?}", e))
-            .ok()
-    }
+    let ds = DecStream::new(dec, bits);
+    Some(ds)
 }
 
-/* Dec */
-
-#[derive(PartialEq, Eq, Debug)]
-pub struct Dec<T> {
-    trie: BinTrie<T>
-}
-
-impl<T> Dec<T> {
-    pub fn decode<I>(&self, input: &mut I) -> Option<&T>
-        where I: Iterator<Item = Bit>
-    {
-        self.trie.lookup(input)
-    }
-}
-
-/* build */
+const BIT_ORDER: BitOrder = BitOrder::MsbFirst;
 
 /// Builds an encoder/decoder pair from item/frequency pairs
-pub fn build<I, T, N>(freq_items: I) -> (Enc<T>, Dec<T>)
+fn build<I, T, N>(freq_items: I) -> (Enc<T>, Dec<T>)
     where I: Iterator<Item = (T, N)>,
         T: Eq + Hash + Clone,
         N: Add<Output = N> + Ord
@@ -118,6 +116,52 @@ pub fn build<I, T, N>(freq_items: I) -> (Enc<T>, Dec<T>)
     };
     let enc = Enc::from(&dec);
     (enc, dec)
+}
+
+/* Enc */
+
+struct Enc<T> {
+    codes: HashMap<T, BitArray>
+}
+
+impl<T: Hash + Eq + Clone> From<&Dec<T>> for Enc<T> {
+    fn from(enc: &Dec<T>) -> Self {
+        let mut codes = HashMap::new();
+        for (bits, symbol) in enc.trie.iter() {
+            codes.insert(symbol.clone(), BitArray::from_slice(&bits as &[Bit], BIT_ORDER));
+        }
+        Enc {
+            codes
+        }
+    }
+}
+
+impl<T: Hash + Eq> Enc<T> {
+    fn encode<W: bit::WriteBit>(&self, symbol: &T, writer: &mut W) -> Option<()> {
+        let code = self.codes.get(symbol)?;
+        if code.len() == 0 {
+            return Some(());
+        }
+
+        writer.write_arr(code)
+            .map_err(|e| eprintln!("{:?}", e))
+            .ok()
+    }
+}
+
+/* Dec */
+
+#[derive(PartialEq, Eq, Debug)]
+struct Dec<T> {
+    trie: BinTrie<T>
+}
+
+impl<T> Dec<T> {
+    fn decode<I>(&self, input: &mut I) -> Option<&T>
+        where I: Iterator<Item = Bit>
+    {
+        self.trie.lookup(input)
+    }
 }
 
 /* BinTrie */
@@ -250,8 +294,6 @@ impl<'a, T> BinTrieIter<'a, T> {
 }
 
 /* Serialize / Deserialize */
-use std::io;
-use crate::ser::{Serialize, Deserialize};
 
 const SER_ENUM_LEAF:   u8 = 0;
 const SER_ENUM_BRANCH: u8 = 1;
@@ -315,22 +357,12 @@ pub struct DecStream<I, T> {
 }
 
 impl<I, T> DecStream<I, T> {
-    pub fn new(dec: Dec<T>, bits: I) -> Self {
+    fn new(dec: Dec<T>, bits: I) -> Self {
         DecStream {
             dec,
             bits
         }
     }
-}
-
-pub fn dec_stream_easy<I: Iterator<Item = u8>, T: Deserialize>(mut input: I) -> Option<DecStream<impl Iterator<Item = Bit>, T>> {
-    // In "easy" mode, we expect the decoder
-    // to have been serialized just before the data
-    let dec = <Dec<T>>::deserialize(&mut input)?;
-    let bits = bit_reader(input, BIT_ORDER);
-
-    let ds = DecStream::new(dec, bits);
-    Some(ds)
 }
 
 impl<I: Iterator<Item = Bit>, T: Clone> Iterator for DecStream<I, T> {
