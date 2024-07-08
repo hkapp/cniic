@@ -41,8 +41,7 @@ impl Codec for Hufman {
         let dims: (u32, u32) = Deserialize::deserialize(reader)?;
 
         // Read the data and create the image
-        let mut bits = reader.flat_map(
-                            |n| bit::bit_array(n, huf::BIT_ORDER).into_iter());
+        let mut bits = bit::bit_reader(reader, huf::BIT_ORDER);
         let mut img = image::RgbImage::new(dims.0, dims.1);
         for px in img.pixels_mut() {
             match dec.decode(&mut bits) {
@@ -51,7 +50,7 @@ impl Codec for Hufman {
                 },
                 None => {
                     eprintln!("Failed to decode symbol");
-                    if reader.next().is_none() {
+                    if bits.next().is_none() {
                         eprintln!("Reached the end of the stream");
                     }
                     return None;

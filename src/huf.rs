@@ -1,9 +1,11 @@
+//! TODO
+
 use std::cmp::Ordering;
 use std::collections::{HashMap, BinaryHeap};
 use std::hash::Hash;
 use std::ops::Add;
 
-use crate::bit::{Bit, BitOrder, BitArray};
+use crate::bit::{bit_reader, Bit, BitArray, BitOrder};
 use crate::bit;
 
 pub const BIT_ORDER: BitOrder = BitOrder::MsbFirst;
@@ -56,6 +58,7 @@ impl<T> Dec<T> {
 
 /* build */
 
+/// Builds an encoder/decoder pair from item/frequency pairs
 pub fn build<I, T, N>(freq_items: I) -> (Enc<T>, Dec<T>)
     where I: Iterator<Item = (T, N)>,
         T: Eq + Hash + Clone,
@@ -301,6 +304,42 @@ impl<T: Deserialize> Deserialize for BinTrie<T> {
                 None // Failed to deserialize
             }
         }
+    }
+}
+
+/* DecStream */
+
+pub struct DecStream<I, T> {
+    dec:  Dec<T>,
+    bits: I
+}
+
+impl<I, T> DecStream<I, T> {
+    pub fn new(dec: Dec<T>, bits: I) -> Self {
+        DecStream {
+            dec,
+            bits
+        }
+    }
+}
+
+pub fn dec_stream_easy<I: Iterator<Item = u8>, T: Deserialize>(mut input: I) -> Option<DecStream<impl Iterator<Item = Bit>, T>> {
+    // In "easy" mode, we expect the decoder
+    // to have been serialized just before the data
+    let dec = <Dec<T>>::deserialize(&mut input)?;
+    let bits = bit_reader(input, BIT_ORDER);
+
+    let ds = DecStream::new(dec, bits);
+    Some(ds)
+}
+
+impl<I: Iterator<Item = Bit>, T: Clone> Iterator for DecStream<I, T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.dec
+            .decode(&mut self.bits)
+            .cloned()
     }
 }
 

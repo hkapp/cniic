@@ -44,6 +44,24 @@ impl Deserialize for u16 {
     }
 }
 
+/* i16 */
+
+impl Serialize for i16 {
+    fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        writer.write_all(&self.to_le_bytes())
+    }
+}
+
+impl Deserialize for i16 {
+    fn deserialize<I: Iterator<Item = u8>>(stream: &mut I) -> Option<Self> {
+        let n = i16::from_le_bytes([
+            stream.next()?,
+            stream.next()?,
+        ]);
+        Some(n)
+    }
+}
+
 /* u32 */
 
 impl Serialize for u32 {
@@ -162,6 +180,27 @@ impl<T:Deserialize> Deserialize for Vec<T> {
             vec.push(Deserialize::deserialize(stream)?);
         }
         Some(vec)
+    }
+}
+
+/* [T; n] */
+
+impl<T: Serialize, const N: usize> Serialize for [T; N] {
+    fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        for i in 0..N {
+            self[i].serialize(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl<T: Deserialize, const N: usize> Deserialize for [T; N] {
+    fn deserialize<I: Iterator<Item = u8>>(stream: &mut I) -> Option<Self> {
+        (0..N)
+            .map(|_| T::deserialize(stream))
+            .collect::<Option<Vec<T>>>()?
+            .try_into()
+            .ok()
     }
 }
 

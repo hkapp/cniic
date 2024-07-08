@@ -111,6 +111,7 @@ macro_rules! gen_all {
 gen_all!(
     clusterc, ClusterColors;
     clusterc, VoronoiCluster;
+    hilbertc, Delta;
     hilbertc, Hilbert;
     hufc, Hufman;
     zipc, Zip
