@@ -25,7 +25,7 @@ Legend:
 * `zip-back`: Zip-inspired lookback compression
 * `hilbert-rle`: Run-Length Encoding on a Hilbert curve traversal
 * `hilbert-zip`: `zip-dict` on a Hilbert curve traversal
-* `delta`: Hufman encode neighbouring pixel difference
+* `delta`: Hufman encode neighbouring pixel differences
 
 #### Lossy codecs
 
@@ -46,7 +46,7 @@ Legend:
 * `hilbert-rle-approx`: Approximate Run-Length Encoding on a Hilbert curve traversal
   * running average with an allowed color distance of 1 (bottom right), 2, 4, 8, 16 (top left)
 * `hilbert-zip`: `zip-dict` on a Hilbert curve traversal
-* `delta`: Hufman encode neighbouring pixel difference
+* `delta`: Hufman encode neighbouring pixel differences
 
 ### ASCII art codec descriptions
 

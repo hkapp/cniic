@@ -403,32 +403,26 @@ pub struct Delta;
 
 impl Codec for Delta {
     fn encode<W: std::io::Write>(&self, img: &super::Img, writer: &mut W) -> std::io::Result<()> {
-        // 1. Serialize the dimensions of the image
         let dimensions = img.dimensions();
         dimensions.serialize(writer)?;
 
-        // 2. Write the first color
-        let (first_color, _) = diff_stream(img);
-        first_color.serialize(writer)?;
+        let new_diff_stream = || {
+            let hilbert = hilbert::linearize(img).map(|px| px.to_rgb());
+            DiffStream::new(hilbert)
+        };
 
-        // 3. Hufman encode the differences
-        huf::encode_all(|| diff_stream(img).1, writer)
+        huf::encode_all(new_diff_stream, writer)
     }
 
     fn decode<I: Iterator<Item = u8>>(&self, reader: &mut I) -> Option<Img> {
         let (dimensions, mut img_buffer) = super::create_image_buffer_standard(reader)?;
 
-        // Read the first color
-        let first_color = <Rgb<u8>>::deserialize(reader)?;
-        let mut hilbert = hilbert::iter(dimensions.0 as usize, dimensions.1 as usize);
+        let hilbert = hilbert::iter(dimensions.0 as usize, dimensions.1 as usize);
 
-        // Write the first color
-        let (x, y) = hilbert.next().unwrap();
-        *img_buffer.get_pixel_mut(x as u32, y as u32) = first_color;
+        let diff_stream = huf::decode_all(reader).unwrap();
+        let color_stream = FromDiff::new(diff_stream);
 
         // Follow the Hilbert traversal to reconstruct the image
-        let diff_stream = huf::decode_all(reader).unwrap();
-        let color_stream = FromDiff::new(first_color, diff_stream);
         for ((x, y), color) in hilbert.zip(color_stream) {
             *img_buffer.get_pixel_mut(x as u32, y as u32) = color;
         }
@@ -445,6 +439,11 @@ impl Codec for Delta {
     }
 }
 
+// We start the encoding and decoding process assuming that the last
+// color was [0; 3].
+// The first diff will mechanically be the first color.
+const START: SignedColor = SignedColor([0; 3]);
+
 /* DiffStream */
 
 struct DiffStream<I> {
@@ -452,21 +451,13 @@ struct DiffStream<I> {
     last:  SignedColor,
 }
 
-impl<I: Iterator<Item=Rgb<u8>>> DiffStream<I> {
-    fn new(mut input: I) -> Option<(Rgb<u8>, Self)> {
-        let first = input.next()?;
-        let ds =
-            DiffStream {
-                input,
-                last: first.into(),
-            };
-        Some((first, ds))
+impl<I> DiffStream<I> {
+    fn new(input: I) -> Self {
+        DiffStream {
+            input,
+            last: START,
+        }
     }
-}
-
-fn diff_stream(img: &Img) -> (Rgb<u8>, DiffStream<impl Iterator<Item=Rgb<u8>> + '_>) {
-    let iter = hilbert::linearize(img).map(|px| px.to_rgb());
-    DiffStream::new(iter).unwrap()
 }
 
 impl<I: Iterator<Item=Rgb<u8>>> Iterator for DiffStream<I> {
@@ -477,7 +468,6 @@ impl<I: Iterator<Item=Rgb<u8>>> Iterator for DiffStream<I> {
             Some(c) => {
                 let new_signed = c.into();
                 let diff = new_signed - self.last;
-                // println!("{:?} - {:?} = {:?}", new_signed, self.last, diff);
                 self.last = new_signed;
                 Some(diff)
             },
@@ -495,9 +485,9 @@ struct FromDiff<I> {
 }
 
 impl<I> FromDiff<I> {
-    fn new(first_color: Rgb<u8>, diff_stream: I) -> Self {
+    fn new(diff_stream: I) -> Self {
         FromDiff {
-            last_color: first_color.into(),
+            last_color: START,
             diff_stream,
         }
     }
@@ -511,7 +501,6 @@ impl<I: Iterator<Item = SignedColor>> Iterator for FromDiff<I> {
             .next()
             .map(|new_diff| {
                 let new_signed = self.last_color + new_diff;
-                // println!("{:?} + {:?} -> {:?}", self.last_color, new_diff, new_signed);
                 self.last_color = new_signed;
                 new_signed.try_into()
                     .unwrap()

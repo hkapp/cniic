@@ -1,6 +1,5 @@
 use std::io;
 
-
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Bit {
     Zero,
@@ -258,7 +257,6 @@ pub fn bit_reader<I: Iterator<Item = u8>>(bytes: I, bo: BitOrder) -> impl Iterat
     bytes.flat_map(
         move |n| bit_array(n, bo).into_iter())
 }
-
 
 #[cfg(test)]
 mod tests {
