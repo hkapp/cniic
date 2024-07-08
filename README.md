@@ -25,6 +25,7 @@ Legend:
 * `zip-back`: Zip-inspired lookback compression
 * `hilbert-rle`: Run-Length Encoding on a Hilbert curve traversal
 * `hilbert-zip`: `zip-dict` on a Hilbert curve traversal
+* `delta`: Hufman encode neighbouring pixel difference
 
 #### Lossy codecs
 
@@ -45,6 +46,7 @@ Legend:
 * `hilbert-rle-approx`: Approximate Run-Length Encoding on a Hilbert curve traversal
   * running average with an allowed color distance of 1 (bottom right), 2, 4, 8, 16 (top left)
 * `hilbert-zip`: `zip-dict` on a Hilbert curve traversal
+* `delta`: Hufman encode neighbouring pixel difference
 
 ### ASCII art codec descriptions
 
@@ -85,8 +87,8 @@ output:                      |                  |           |
 #### hilbert codecs
 
 ```
-   Hilbert
-  traversal
+   Hilbert             input
+  traversal            image
                     +----------+
  5--6  9--a         |6  8  7  7|
  |  |  |  |         |          |
@@ -139,4 +141,51 @@ output:                      |                  |           |
                   |
                   v
      0x0003 0x0003 0x0005 0x0007 0x0006 ...
+```
+
+#### delta
+
+```
+           Hilbert             input
+          traversal            image
+                            +----------+
+         5--6  9--a         |6  8  7  7|
+         |  |  |  |         |          |
+         4  7--8  b         |6  8  7  8|
+         |        |         |          |
+         3--2  d--c         |7  5  9  9|
+            |  |            |          |
+         0--1  e--f         |3  3  8  9|
+                            +----------+
+             |                   |
+             +---------+---------+
+                       |
+                       v
+  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f
++------------------------------------------------+
+| 3  3  5  7  6  6  8  8  7  7  7  8  9  9  8  9 |
++------------------------------------------------+
+                       |
+            difference with previous
+                       |
+                       v
++------------------------------------------------+
+| 3  0  2  2 -1  0  2  0 -1  0  0  1  1  0 -1  1 |
++------------------------------------------------+
+                       |
+                 Hufman encoding  -----------v
+                       |                     *
+                       |                 0 /   \ 1
+                       |                 /       \
+                       |               0           *
+                       |               0       0 /   \ 1
+                       |                       /       \
+                       |                     *           *
+                       |                 0 /  \ 1     0 /  \ 1
+                       |                 /     \       /     \
+                       |              -1        1     2        3
+                       |              100      101   110      111
+                       |
+                       v
+output: 111 0 110 110 100 0 110 0 100 0 0 101 101 0 100 101
 ```
