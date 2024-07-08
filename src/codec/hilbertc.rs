@@ -445,31 +445,6 @@ impl Codec for Delta {
     }
 }
 
-// TODO move
-#[derive(PartialEq, Eq, Clone, Copy, Hash, Debug)]
-struct SignedColor([i16; 3]);
-
-impl From<Rgb<u8>> for SignedColor {
-    fn from(value: Rgb<u8>) -> Self {
-        SignedColor(
-            value.0
-                .map(|x| x as i16)
-        )
-    }
-}
-
-impl Serialize for SignedColor {
-    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        self.0.serialize(writer)
-    }
-}
-
-impl Deserialize for SignedColor {
-    fn deserialize<I: Iterator<Item = u8>>(stream: &mut I) -> Option<Self> {
-        Some(SignedColor(Deserialize::deserialize(stream)?))
-    }
-}
-
 /* DiffStream */
 
 struct DiffStream<I> {
@@ -511,17 +486,6 @@ impl<I: Iterator<Item=Rgb<u8>>> Iterator for DiffStream<I> {
     }
 }
 
-impl Sub for SignedColor {
-    type Output = Self;
-
-    fn sub(mut self, rhs: Self) -> Self::Output {
-        for i in 0..3 {
-            self.0[i] -= rhs.0[i];
-        }
-        self
-    }
-}
-
 /* FromDiff */
 
 /// The reverse of [DiffStream]
@@ -555,7 +519,22 @@ impl<I: Iterator<Item = SignedColor>> Iterator for FromDiff<I> {
     }
 }
 
-// TODO move
+/* SignedColor */
+
+/// A signed 3-dimensional vector whose elements
+/// can represent values in the range \[-255, 255\]
+#[derive(PartialEq, Eq, Clone, Copy, Hash, Debug)]
+struct SignedColor([i16; 3]);
+
+impl From<Rgb<u8>> for SignedColor {
+    fn from(value: Rgb<u8>) -> Self {
+        SignedColor(
+            value.0
+                .map(|x| x as i16)
+        )
+    }
+}
+
 impl TryFrom<SignedColor> for Rgb<u8> {
     type Error = <u8 as TryFrom<i16>>::Error;
 
@@ -568,7 +547,17 @@ impl TryFrom<SignedColor> for Rgb<u8> {
     }
 }
 
-// TODO move next to the DS
+impl Sub for SignedColor {
+    type Output = Self;
+
+    fn sub(mut self, rhs: Self) -> Self::Output {
+        for i in 0..3 {
+            self.0[i] -= rhs.0[i];
+        }
+        self
+    }
+}
+
 impl Add for SignedColor {
     type Output = Self;
 
@@ -580,15 +569,25 @@ impl Add for SignedColor {
     }
 }
 
+impl Serialize for SignedColor {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        self.0.serialize(writer)
+    }
+}
+
+impl Deserialize for SignedColor {
+    fn deserialize<I: Iterator<Item = u8>>(stream: &mut I) -> Option<Self> {
+        Some(SignedColor(Deserialize::deserialize(stream)?))
+    }
+}
+
 /* Delta parser */
 
 impl FromStr for Delta {
     type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // TODO convert result to ParseError
-        prs::matches_fully(s, "delta")
+        prs::expect_name(s, "delta")
             .map(|_| Delta)
-            .ok_or_else(|| ParseError::WrongName { expected: String::from("delta"), found: String::from(s) })
     }
 }
