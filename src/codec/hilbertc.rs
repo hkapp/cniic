@@ -1,13 +1,13 @@
+use std::ops::{Sub, Add};
 use std::str::FromStr;
 use image::{GenericImageView, ImageBuffer, Pixel, Rgb};
 use crate::geom::Distance;
 use crate::hilbert;
-use crate::prs;
-use crate::prs::ParseAlternatives;
-use crate::prs::ParseError;
+use crate::huf;
+use crate::prs::{self, ParseError, ParseAlternatives};
 use crate::ser::{deser_stream, Deserialize, SerStream, Serialize};
 use crate::zip::{zip_dict_decode, zip_dict_encode};
-use super::Codec;
+use super::{Codec, Img};
 
 pub struct Hilbert {
     compress: CompressionMethod
@@ -391,5 +391,192 @@ impl FromStr for CompressionMethod {
             .then_try("rle", parse_rle)
             .then_try("zip", parse_zip)
             .end()
+    }
+}
+
+/* Delta compressor */
+
+/// Traverse the image following a Hilbert curve,
+/// computing the difference between subsequent pixels.
+/// Apply Hufman encoding to the resulting sequence of differences.
+pub struct Delta;
+
+impl Codec for Delta {
+    fn encode<W: std::io::Write>(&self, img: &super::Img, writer: &mut W) -> std::io::Result<()> {
+        let dimensions = img.dimensions();
+        dimensions.serialize(writer)?;
+
+        let new_diff_stream = || {
+            let hilbert = hilbert::linearize(img).map(|px| px.to_rgb());
+            DiffStream::new(hilbert)
+        };
+
+        huf::encode_all(new_diff_stream, writer)
+    }
+
+    fn decode<I: Iterator<Item = u8>>(&self, reader: &mut I) -> Option<Img> {
+        let (dimensions, mut img_buffer) = super::create_image_buffer_standard(reader)?;
+
+        let hilbert = hilbert::iter(dimensions.0 as usize, dimensions.1 as usize);
+
+        let diff_stream = huf::decode_all(reader).unwrap();
+        let color_stream = FromDiff::new(diff_stream);
+
+        // Follow the Hilbert traversal to reconstruct the image
+        for ((x, y), color) in hilbert.zip(color_stream) {
+            *img_buffer.get_pixel_mut(x as u32, y as u32) = color;
+        }
+
+        Some(img_buffer.into())
+    }
+
+    fn name(&self) -> String {
+        String::from("delta")
+    }
+
+    fn is_lossless(&self) -> bool {
+        true
+    }
+}
+
+// We start the encoding and decoding process assuming that the last
+// color was [0; 3].
+// The first diff will mechanically be the first color.
+const START: SignedColor = SignedColor([0; 3]);
+
+/* DiffStream */
+
+struct DiffStream<I> {
+    input: I,
+    last:  SignedColor,
+}
+
+impl<I> DiffStream<I> {
+    fn new(input: I) -> Self {
+        DiffStream {
+            input,
+            last: START,
+        }
+    }
+}
+
+impl<I: Iterator<Item=Rgb<u8>>> Iterator for DiffStream<I> {
+    type Item = SignedColor;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.input.next() {
+            Some(c) => {
+                let new_signed = c.into();
+                let diff = new_signed - self.last;
+                self.last = new_signed;
+                Some(diff)
+            },
+            None => None,
+        }
+    }
+}
+
+/* FromDiff */
+
+/// The reverse of [DiffStream]
+struct FromDiff<I> {
+    diff_stream: I,
+    last_color:  SignedColor
+}
+
+impl<I> FromDiff<I> {
+    fn new(diff_stream: I) -> Self {
+        FromDiff {
+            last_color: START,
+            diff_stream,
+        }
+    }
+}
+
+impl<I: Iterator<Item = SignedColor>> Iterator for FromDiff<I> {
+    type Item = Rgb<u8>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.diff_stream
+            .next()
+            .map(|new_diff| {
+                let new_signed = self.last_color + new_diff;
+                self.last_color = new_signed;
+                new_signed.try_into()
+                    .unwrap()
+            })
+    }
+}
+
+/* SignedColor */
+
+/// A signed 3-dimensional vector whose elements
+/// can represent values in the range \[-255, 255\]
+#[derive(PartialEq, Eq, Clone, Copy, Hash, Debug)]
+struct SignedColor([i16; 3]);
+
+impl From<Rgb<u8>> for SignedColor {
+    fn from(value: Rgb<u8>) -> Self {
+        SignedColor(
+            value.0
+                .map(|x| x as i16)
+        )
+    }
+}
+
+impl TryFrom<SignedColor> for Rgb<u8> {
+    type Error = <u8 as TryFrom<i16>>::Error;
+
+    fn try_from(value: SignedColor) -> Result<Self, Self::Error> {
+        let mut res = [0; 3];
+        for i in 0..3 {
+            res[i] = value.0[i].try_into()?;
+        }
+        Ok(Rgb(res))
+    }
+}
+
+impl Sub for SignedColor {
+    type Output = Self;
+
+    fn sub(mut self, rhs: Self) -> Self::Output {
+        for i in 0..3 {
+            self.0[i] -= rhs.0[i];
+        }
+        self
+    }
+}
+
+impl Add for SignedColor {
+    type Output = Self;
+
+    fn add(mut self, rhs: Self) -> Self::Output {
+        for i in 0..3 {
+            self.0[i] += rhs.0[i];
+        }
+        self
+    }
+}
+
+impl Serialize for SignedColor {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        self.0.serialize(writer)
+    }
+}
+
+impl Deserialize for SignedColor {
+    fn deserialize<I: Iterator<Item = u8>>(stream: &mut I) -> Option<Self> {
+        Some(SignedColor(Deserialize::deserialize(stream)?))
+    }
+}
+
+/* Delta parser */
+
+impl FromStr for Delta {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        prs::expect_name(s, "delta")
+            .map(|_| Delta)
     }
 }

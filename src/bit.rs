@@ -200,6 +200,7 @@ impl<W> IoBitWriter<W> {
         }
     }
 
+    #[cfg(test)]
     pub fn into_inner(self) -> W {
         self.writer
     }
@@ -250,6 +251,11 @@ impl<W: io::Write> WriteBit for IoBitWriter<W> {
         }
         self.writer.flush()
     }
+}
+
+pub fn bit_reader<I: Iterator<Item = u8>>(bytes: I, bo: BitOrder) -> impl Iterator<Item = Bit> {
+    bytes.flat_map(
+        move |n| bit_array(n, bo).into_iter())
 }
 
 #[cfg(test)]

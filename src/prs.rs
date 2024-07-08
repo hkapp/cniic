@@ -1,5 +1,10 @@
 use regex::Regex;
 
+pub fn expect_name<'a>(input: &'a str, name_regex: &str) -> Result<&'a str, ParseError> {
+    matches_fully(input, name_regex)
+        .ok_or_else(|| ParseError::WrongName { expected: name_regex.into(), found: input.into() })
+}
+
 pub fn matches_fully<'a>(input: &'a str, regex: &str) -> Option<&'a str> {
     let full_string_regex = format!("^{}$", regex);
     let regexp = Regex::new(&full_string_regex).unwrap();

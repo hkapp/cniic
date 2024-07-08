@@ -1,8 +1,6 @@
-use crate::{huf, utils};
-use image::{GenericImageView, Pixel};
+use crate::{huf, ser::Serialize};
+use image::{GenericImageView, Pixel, Rgb};
 use std::io;
-use crate::ser::{Serialize, Deserialize};
-use crate::bit::{self, WriteBit};
 use super::{Codec, Img};
 use std::str::FromStr;
 
@@ -12,46 +10,25 @@ pub struct Hufman;
 
 impl Codec for Hufman {
     fn encode<W: io::Write>(&self, img: &Img, writer: &mut W) -> io::Result<()> {
-        let pixels_iter = || img.pixels().map(|(_x, _y, px)| px.to_rgb());
-        let freqs = utils::count_freqs(pixels_iter());
-        let (enc, dec) = huf::build(freqs.into_iter());
-
-        // Start by serializing the decoder
-        dec.serialize(writer)?;
-
-        // Write the dimensions of the image
         img.dimensions().serialize(writer)?;
 
-        // Now write the data
-        let mut bw = bit::IoBitWriter::new(writer, huf::BIT_ORDER);
-        for px in pixels_iter() {
-            enc.encode(&px, &mut bw);
-        }
-        bw.pad_and_flush()?;
-        bw.into_inner().flush()?;
-
-        Ok(())
+        let pixels_iter = || img.pixels().map(|(_x, _y, px)| px.to_rgb());
+        huf::encode_all(pixels_iter, writer)
     }
 
     fn decode<I: Iterator<Item = u8>>(&self, reader: &mut I) -> Option<Img> {
-        // Start by reading the decoder
-        let dec: huf::Dec<image::Rgb<u8>> = Deserialize::deserialize(reader)?;
-
-        // Read the dimensions of the image
-        let dims: (u32, u32) = Deserialize::deserialize(reader)?;
+        let (_, mut img) = super::create_image_buffer_standard(reader)?;
 
         // Read the data and create the image
-        let mut bits = reader.flat_map(
-                            |n| bit::bit_array(n, huf::BIT_ORDER).into_iter());
-        let mut img = image::RgbImage::new(dims.0, dims.1);
+        let mut symbols = huf::decode_all::<_, Rgb<u8>>(reader)?;
         for px in img.pixels_mut() {
-            match dec.decode(&mut bits) {
+            match symbols.next() {
                 Some(x) => {
-                    *px = *x;
+                    *px = x;
                 },
                 None => {
                     eprintln!("Failed to decode symbol");
-                    if reader.next().is_none() {
+                    if symbols.next().is_none() {
                         eprintln!("Reached the end of the stream");
                     }
                     return None;

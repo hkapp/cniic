@@ -5,7 +5,9 @@ mod zipc;
 
 use std::io;
 use std::str::FromStr;
+use image::{ImageBuffer, Pixel, Rgb};
 use crate::prs::{ParseError, ParseAlternatives};
+use crate::ser::Deserialize;
 
 pub type Img = image::DynamicImage;
 
@@ -14,6 +16,13 @@ pub trait Codec {
     fn decode<I: Iterator<Item = u8>>(&self, reader: &mut I) -> Option<Img>;
     fn name(&self) -> String;
     fn is_lossless(&self) -> bool;
+}
+
+// Utility function for the sub modules
+fn create_image_buffer_standard<I: Iterator<Item = u8>>(reader: &mut I) -> Option<((u32, u32), ImageBuffer<Rgb<u8>, Vec<<Rgb<u8> as Pixel>::Subpixel>>)> {
+    let dimensions = <(u32, u32)>::deserialize(reader)?;
+    let img_buffer = ImageBuffer::new(dimensions.0, dimensions.1);
+    Some((dimensions, img_buffer))
 }
 
 // To add new codecs, simply add an entry in the gen_all
@@ -111,6 +120,7 @@ macro_rules! gen_all {
 gen_all!(
     clusterc, ClusterColors;
     clusterc, VoronoiCluster;
+    hilbertc, Delta;
     hilbertc, Hilbert;
     hufc, Hufman;
     zipc, Zip
